@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Call Center Simulation</title>
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.55.2/dist/phaser.min.js"></script>
+  <style>
+    body { margin: 0; background: #111; color: white; font-family: sans-serif; }
+    canvas { display: block; }
+    #controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 10;
+    }
+    #controls button {
+      margin-right: 8px;
+      padding: 6px 12px;
+      font-size: 14px;
+    }
+    #stats-panel {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 10px;
+      border-radius: 5px;
+      width: 150px;
+    }
+    #stats-panel h3 {
+      margin-top: 0;
+      font-size: 16px;
+      text-align: center;
+    }
+    #stats-panel p {
+      margin: 5px 0;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <button id="startBtn">Start</button>
+    <button id="ringBtn">Start Ringing</button>
+    <button id="answerBtn">Answer</button>
+    <button id="hangupBtn">Hangup</button>
+    <button id="divertBtn">Divert</button>
+  </div>
+  <div id="stats-panel">
+    <h3>Call Stats</h3>
+    <p>TOTAL: <span id="totalCalls">0</span></p>
+    <p>ANSWERED: <span id="answeredCalls">0</span></p>
+    <p>ABANDONED: <span id="abandonedCalls">0</span></p>
+    <p>DIVERTED: <span id="divertedCalls">0</span></p>
+  </div>
+  <script>
+    const config = {
+      type: Phaser.AUTO,
+      width: window.innerWidth,
+      height: window.innerHeight,
+      backgroundColor: '#202020',
+      scene: { preload, create, update },
+      scale: {
+        mode: Phaser.Scale.RESIZE,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+      }
+    };
+
+    let graphics;
+    let callQueue = [];
+    let agentNodes = [];
+    let links = [];
+    let waves = [];
+    let growingCall = false;
+    let exitingPairs = [];
+    let waveTimer = 0;
+    let draggingNode = null;
+    let callCounter = 0;
+    let callIdTexts;
+    let hungupCalls = [];
+    let divertedCalls = [];
+
+    let totalCalls = 0;
+    let answeredCalls = 0;
+    let abandonedCalls = 0;
+    let divertedCallsCount = 0;
+
+    new Phaser.Game(config);
+
+    function preload() {}
+
+    function create() {
+      graphics = this.add.graphics();
+      callIdTexts = this.add.group();
+
+      updateCallStats();
+
+      // Adjust startX to move the queue further left
+      const queueStartX = this.scale.width - 300; // Shift left by 260 pixels from the right edge
+
+      // Create 256 agents at the top and bottom
+      for (let i = 0; i < 256; i++) {
+        const x = Phaser.Math.Between(20, this.scale.width - 20);
+        const y = (i < 128) ? Phaser.Math.Between(20, 100) : Phaser.Math.Between(this.scale.height - 100, this.scale.height - 20);
+        agentNodes.push({
+            id: i + 1, x, y, homeX: x, homeY: y, radius: 5, baseRadius: 5,
+            color: 0xffffff, type: 'agent', vx: 0, vy: 0, isBusy: false,
+            pulsePhase: Math.random() * Math.PI * 2
+        });
+      }
+
+      this.scale.on('resize', resize, this);
+
+      function resize(gameSize, baseSize, displaySize, resolution) {
+        const width = gameSize.width;
+        const height = gameSize.height;
+
+        this.cameras.main.setSize(width, height);
+
+        // Update call queue y position
+        callQueue.forEach(call => {
+            call.y = height / 2;
+            if (call.textObject) {
+                call.textObject.y = height / 2;
+            }
+        });
+
+        // Update agent homeY positions
+        agentNodes.forEach(agent => {
+            if (agent.homeY < baseSize.height / 2) { // If agent was in top half
+                agent.homeY = Phaser.Math.Between(20, 100);
+            } else { // If agent was in bottom half
+                agent.homeY = Phaser.Math.Between(height - 100, height - 20);
+            }
+        });
+
+        // Reorder queue to adjust x positions based on new width
+        reorderQueue(this);
+      }
+
+      this.input.on('pointerdown', (pointer) => {
+        const node = agentNodes.find(n => Math.hypot(pointer.x - n.x, pointer.y - n.y) < n.radius);
+        if (node) draggingNode = node;
+      });
+      this.input.on('pointerup', () => { draggingNode = null; });
+      this.input.on('pointermove', (pointer) => {
+        if (draggingNode) { draggingNode.x = pointer.x; draggingNode.y = pointer.y; draggingNode.vx = 0; draggingNode.vy = 0; }
+      });
+
+      document.getElementById('startBtn').onclick = () => {
+        const spacing = 40;
+        const startX = this.scale.width - 40;
+        callCounter++;
+        totalCalls++;
+        updateCallStats();
+
+        const newCall = {
+          id: callCounter, y: this.scale.height / 2, radius: 0, targetRadius: 15, color: 0xffffff,
+          type: 'call', vx: 0, vy: 0, fixed: true, state: 'queued'
+        };
+        newCall.x = -newCall.radius; // Start off-screen to the left
+
+        const text = this.add.text(newCall.x, newCall.y, newCall.id, { font: '12px Arial', fill: '#000000' }).setOrigin(0.5);
+        newCall.textObject = text;
+        callIdTexts.add(text);
+
+        callQueue.unshift(newCall);
+        growingCall = true;
+        reorderQueue(this);
+      };
+
+      document.getElementById('ringBtn').onclick = () => {
+        const queuedCalls = callQueue.filter(c => c.state === 'queued');
+        if (queuedCalls.length === 0) return;
+        const nextInQueue = queuedCalls[queuedCalls.length - 1]; // Get the right-most queued call
+
+        const freeAgents = agentNodes.filter(a => !a.isBusy);
+        if (freeAgents.length === 0) return;
+
+        nextInQueue.state = 'ringing';
+        const numToSelect = Phaser.Math.Between(1, Math.min(10, freeAgents.length));
+        
+        Phaser.Utils.Array.Shuffle(freeAgents);
+
+        for (let i = 0; i < numToSelect; i++) {
+            const agent = freeAgents[i];
+            agent.isBusy = true;
+            links.push({ source: nextInQueue, target: agent });
+        }
+      };
+
+      document.getElementById('answerBtn').onclick = () => {
+        const ringingCalls = callQueue.filter(c => c.state === 'ringing');
+        if (ringingCalls.length === 0) return;
+
+        const answeringCall = ringingCalls[ringingCalls.length - 1];
+        
+        const agentsForCall = links.filter(l => l.source === answeringCall).map(l => l.target);
+        if (agentsForCall.length === 0) return;
+
+        answeringCall.state = 'answered';
+        answeringCall.color = 0x00ff00;
+
+        callQueue.forEach(c => {
+            if (c.state === 'queued' || c.state === 'ringing') {
+                c.preShiftTargetX = c.targetX;
+            }
+        });
+
+        const chosenAgent = agentsForCall.shift();
+        chosenAgent.color = 0x00ff00;
+
+        for (const agent of agentsForCall) {
+            agent.isBusy = false;
+        }
+        answeredCalls++;
+        updateCallStats();
+
+        const pairedCall = { ...answeringCall };
+        const pairedAgent = { ...chosenAgent };
+
+        const exitingPair = {
+          call: pairedCall, agent: pairedAgent, state: 'approaching', speed: 10,
+          originalCall: answeringCall, originalAgent: chosenAgent, startX: answeringCall.x
+        };
+
+        if (answeringCall.textObject) {
+            exitingPair.call.textObject = answeringCall.textObject;
+            answeringCall.textObject = null;
+        }
+
+        exitingPairs.push(exitingPair);
+
+        const agentIndex = agentNodes.indexOf(chosenAgent);
+        if (agentIndex > -1) agentNodes.splice(agentIndex, 1);
+
+        links = links.filter(l => l.source !== answeringCall);
+      };
+
+      document.getElementById('hangupBtn').onclick = () => {
+        const queuedCalls = callQueue.filter(c => c.state === 'queued' || c.state === 'ringing');
+        if (queuedCalls.length === 0) return;
+        const callIndex = Phaser.Math.Between(0, queuedCalls.length - 1);
+        const call = queuedCalls[callIndex];
+        
+        const callInQueueIndex = callQueue.indexOf(call);
+        if (callInQueueIndex > -1) callQueue.splice(callInQueueIndex, 1);
+
+        call.state = 'hanged-up';
+        call.exitState = 'moving-up'; // Initial state for two-stage exit
+        call.color = 0xff0000;
+
+        // Free up agents associated with this call
+        links.filter(l => l.source === call).forEach(l => {
+            l.target.isBusy = false;
+            l.target.color = 0xffffff; // Reset color to white
+        });
+
+        hungupCalls.push(call);
+
+        links = links.filter(l => l.source !== call); // Remove links associated with this call
+        abandonedCalls++;
+        updateCallStats();
+        reorderQueue(this);
+      };
+
+      document.getElementById('divertBtn').onclick = () => {
+        const queuedCalls = callQueue.filter(c => c.state === 'queued' || c.state === 'ringing');
+        if (queuedCalls.length === 0) return;
+        const callIndex = Phaser.Math.Between(0, queuedCalls.length - 1);
+        const call = queuedCalls[callIndex];
+
+        const callInQueueIndex = callQueue.indexOf(call);
+        if (callInQueueIndex > -1) callQueue.splice(callInQueueIndex, 1);
+
+        call.state = 'diverted';
+        call.exitState = 'moving-down'; // Initial state for two-stage exit
+        call.color = 0xffff00;
+
+        // Free up agents associated with this call
+        links.filter(l => l.source === call).forEach(l => {
+            l.target.isBusy = false;
+            l.target.color = 0xffffff; // Reset color to white
+        });
+
+        divertedCalls.push(call);
+
+        links = links.filter(l => l.source !== call); // Remove links associated with this call
+        divertedCallsCount++;
+        updateCallStats();
+        reorderQueue(this);
+      };
+    }
+
+    function reorderQueue(scene) {
+        const spacing = 40;
+        const startX = scene.scale.width - 300; // Use dynamic width
+        const activeQueue = callQueue.filter(c => c.state === 'queued' || c.state === 'ringing');
+        for (let i = 0; i < activeQueue.length; i++) {
+            activeQueue[i].targetX = startX - (activeQueue.length - 1 - i) * spacing;
+        }
+    }
+
+    function update(time, delta) {
+      graphics.clear();
+
+      waveTimer += delta;
+      if (waveTimer >= 500) {
+        waveTimer = 0;
+        for (const node of agentNodes.filter(a => a.isBusy)) {
+          waves.push({ sourceNodeId: node.id, radius: 0, maxRadius: 40, alpha: 1, life: 0 });
+        }
+      }
+
+      updateWaves(delta, this);
+      applyForces(this);
+      updatePositions(this);
+
+      for (let i = callQueue.length - 1; i >= 0; i--) {
+        const call = callQueue[i];
+        if (call.radius < call.targetRadius) call.radius += 1;
+        
+        if (call.targetX !== undefined && call.x !== call.targetX) {
+            const dx = call.targetX - call.x;
+            if (Math.abs(dx) < 0.5) call.x = call.targetX;
+            else call.x += dx * 0.1;
+        }
+        if (call.textObject) { call.textObject.x = call.x; call.textObject.y = call.y; }
+      }
+
+      for (let i = hungupCalls.length - 1; i >= 0; i--) {
+        const call = hungupCalls[i];
+        if (call.textObject) { call.textObject.x = call.x; call.textObject.y = call.y; }
+        if (call.exitState === 'moving-up') {
+            call.y -= 10; // Move up
+            if (call.y < this.scale.height / 2 - 50) call.exitState = 'moving-left';
+        } else if (call.exitState === 'moving-left') {
+            call.x -= 15; // Move left
+            if (call.x < -100) { // Off-screen to the left
+                if (call.textObject) call.textObject.destroy();
+                hungupCalls.splice(i, 1);
+            }
+        }
+      }
+
+      for (let i = divertedCalls.length - 1; i >= 0; i--) {
+        const call = divertedCalls[i];
+        if (call.textObject) { call.textObject.x = call.x; call.textObject.y = call.y; }
+        if (call.exitState === 'moving-down') {
+            call.y += 10; // Move down
+            if (call.y > this.scale.height / 2 + 50) call.exitState = 'moving-right';
+        } else if (call.exitState === 'moving-right') {
+            call.x += 15; // Move right
+            if (call.x > this.scale.width + 100) { // Off-screen to the right
+                if (call.textObject) call.textObject.destroy();
+                divertedCalls.splice(i, 1);
+            }
+        }
+      }
+
+      for (let i = exitingPairs.length - 1; i >= 0; i--) {
+        const exitingPair = exitingPairs[i];
+        if (exitingPair.call.textObject) { exitingPair.call.textObject.x = exitingPair.call.x; exitingPair.call.textObject.y = exitingPair.call.y; }
+
+        if (exitingPair.state === 'approaching') {
+          const targetX = exitingPair.call.x + 30, targetY = exitingPair.call.y;
+          const dx = targetX - exitingPair.agent.x, dy = targetY - exitingPair.agent.y;
+          if (Math.abs(dx) < 1 && Math.abs(dy) < 1) exitingPair.state = 'exiting';
+          else { exitingPair.agent.x += dx * 0.5; exitingPair.agent.y += dy * 0.5; }
+        } else if (exitingPair.state === 'exiting') {
+          exitingPair.call.x += exitingPair.speed;
+          exitingPair.agent.x += exitingPair.speed;
+
+          const spacing = 40;
+          const movedDistance = exitingPair.call.x - exitingPair.startX;
+          const shiftAmount = Math.min(movedDistance, spacing);
+
+          const activeQueue = callQueue.filter(c => c.state === 'queued' || c.state === 'ringing');
+          for (const call of activeQueue) {
+              if (call.preShiftTargetX !== undefined) {
+                  call.targetX = call.preShiftTargetX + shiftAmount;
+              }
+          }
+
+          if (exitingPair.call.x > this.scale.width + 50) {
+            if (exitingPair.call.textObject) exitingPair.call.textObject.destroy();
+            const callIdx = callQueue.indexOf(exitingPair.originalCall);
+            if (callIdx > -1) callQueue.splice(callIdx, 1);
+
+            const originalAgent = exitingPair.originalAgent;
+            if (originalAgent) {
+                agentNodes.push(originalAgent);
+                originalAgent.isBusy = false;
+                originalAgent.color = 0xffffff;
+            }
+
+            exitingPairs.splice(i, 1);
+            callQueue.forEach(c => c.preShiftTargetX = undefined);
+            reorderQueue(this);
+          }
+        }
+      }
+
+      for (const link of links) {
+        graphics.lineStyle(2, 0x00ffff, 0.2);
+        graphics.beginPath();
+        graphics.moveTo(link.source.x, link.source.y);
+        graphics.lineTo(link.target.x, link.target.y);
+        graphics.strokePath();
+      }
+
+      for (const wave of waves) {
+        const source = agentNodes.find(n => n.id === wave.sourceNodeId);
+        if (!source) continue;
+        graphics.lineStyle(2, 0xffffff, wave.alpha);
+        graphics.strokeCircle(source.x, source.y, wave.radius);
+      }
+
+      [...callQueue, ...hungupCalls, ...divertedCalls].forEach(call => {
+        if (call.state !== 'answered') {
+            graphics.fillStyle(call.color, 1);
+            graphics.fillCircle(call.x, call.y, call.radius);
+        }
+      });
+
+      agentNodes.forEach((a) => {
+        graphics.fillStyle(a.color, 1);
+        graphics.fillCircle(a.x, a.y, a.baseRadius);
+      });
+
+      for (const exitingPair of exitingPairs) {
+        for (const node of [exitingPair.call, exitingPair.agent]) {
+          graphics.fillStyle(node.color, 1);
+          graphics.fillCircle(node.x, node.y, node.radius);
+        }
+      }
+    }
+
+    function updateWaves(delta, scene) {
+      for (let i = waves.length - 1; i >= 0; i--) {
+        const wave = waves[i];
+        wave.life += delta;
+        const t = wave.life / 1000;
+        wave.radius = t * wave.maxRadius;
+        wave.alpha = 1 - t;
+        if (wave.alpha <= 0) waves.splice(i, 1);
+      }
+    }
+
+    function applyForces(scene) {
+      const repulsionConstant = 2000;
+      const springStiffness = 0.01;
+      const springLength = 250;
+
+      const allNodes = [...callQueue.filter(c => c.state === 'ringing'), ...agentNodes.filter(a => a.isBusy)];
+
+      for (let i = 0; i < allNodes.length; i++) {
+        for (let j = i + 1; j < allNodes.length; j++) {
+          const a = allNodes[i], b = allNodes[j];
+          const dx = b.x - a.x, dy = b.y - a.y;
+          const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+          const force = repulsionConstant / (dist * dist);
+          const fx = force * dx / dist, fy = force * dy / dist;
+
+          if (!a.fixed && a !== draggingNode) { a.vx -= fx; a.vy -= fy; }
+          if (!b.fixed && b !== draggingNode) { b.vx += fx; b.vy += fy; }
+        }
+      }
+
+      for (const link of links) {
+        const a = link.source, b = link.target;
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+        const force = springStiffness * (dist - springLength);
+        const fx = force * dx / dist, fy = force * dy / dist;
+
+        if (!a.fixed && a !== draggingNode) { a.vx += fx; a.vy += fy; }
+        if (!b.fixed && b !== draggingNode) { b.vx -= fx; b.vy -= fy; }
+      }
+    }
+
+    function updatePositions(scene) {
+      for (const node of agentNodes) {
+        if (node.isBusy) {
+            node.vx *= 0.9;
+            node.vy *= 0.9;
+            node.x += node.vx;
+            node.y += node.vy;
+        } else {
+            const dx = node.homeX - node.x;
+            const dy = node.homeY - node.y;
+            if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+                node.x += dx * 0.05;
+                node.y += dy * 0.05;
+            } else {
+                node.x = node.homeX;
+                node.y = node.homeY;
+            }
+        }
+        node.x = Phaser.Math.Clamp(node.x, 0, scene.scale.width);
+        node.y = Phaser.Math.Clamp(node.y, 0, scene.scale.height);
+      }
+
+      const ringingCalls = callQueue.filter(c => c.state === 'ringing');
+      for (const call of ringingCalls) {
+        if (!call.fixed && call !== draggingNode) {
+            call.vx *= 0.9;
+            call.vy *= 0.9;
+            call.x += call.vx;
+            call.y += call.vy;
+            call.x = Phaser.Math.Clamp(call.x, 0, scene.scale.width);
+            call.y = Phaser.Math.Clamp(call.y, 0, scene.scale.height);
+        }
+      }
+    }
+
+    function updateCallStats() {
+        document.getElementById('totalCalls').textContent = totalCalls;
+        document.getElementById('answeredCalls').textContent = answeredCalls;
+        document.getElementById('abandonedCalls').textContent = abandonedCalls;
+        document.getElementById('divertedCalls').textContent = divertedCallsCount;
+    }
+  </script>
+</body>
+</html>
+

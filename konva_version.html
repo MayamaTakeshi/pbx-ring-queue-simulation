@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Call Center Simulation (Konva)</title>
+  <script src="https://unpkg.com/konva@8.3.0/konva.min.js"></script>
+  <style>
+    body { margin: 0; background: #111; color: white; font-family: 'Inter', sans-serif; overflow: hidden; }
+    #container { display: block; } /* Konva stage will be rendered inside this */
+    #controls {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 10;
+    }
+    #controls button {
+      margin-right: 8px;
+      padding: 6px 12px;
+      font-size: 14px;
+      background-color: #4CAF50; /* Green */
+      border: none;
+      color: white;
+      text-align: center;
+      text-decoration: none;
+      display: inline-block;
+      cursor: pointer;
+      border-radius: 5px;
+      box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2);
+      transition: background-color 0.3s ease;
+    }
+    #controls button:hover {
+        background-color: #45a049;
+    }
+    #stats-panel {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 10px;
+      border-radius: 5px;
+      width: 150px;
+      box-shadow: 0 4px 8px 0 rgba(0,0,0,0.2);
+    }
+    #stats-panel h3 {
+      margin-top: 0;
+      font-size: 16px;
+      text-align: center;
+      color: #00ffff; /* Cyan */
+    }
+    #stats-panel p {
+      margin: 5px 0;
+      font-size: 14px;
+      color: #e0e0e0;
+    }
+    #stats-panel span {
+        font-weight: bold;
+        color: #fff;
+    }
+  </style>
+</head>
+<body>
+  <div id="controls">
+    <button id="startBtn">Start Call</button>
+    <button id="ringBtn">Ring Agents</button>
+    <button id="answerBtn">Answer Call</button>
+    <button id="hangupBtn">Hangup Call</button>
+    <button id="divertBtn">Divert Call</button>
+  </div>
+  <div id="stats-panel">
+    <h3>Call Stats</h3>
+    <p>TOTAL: <span id="totalCalls">0</span></p>
+    <p>ANSWERED: <span id="answeredCalls">0</span></p>
+    <p>ABANDONED: <span id="abandonedCalls">0</span></p>
+    <p>DIVERTED: <span id="divertedCalls">0</span></p>
+  </div>
+  <div id="container"></div>
+  <script>
+    // Konva stage and layer setup
+    const stage = new Konva.Stage({
+      container: 'container',
+      width: window.innerWidth,
+      height: window.innerHeight,
+    });
+    const layer = new Konva.Layer();
+    stage.add(layer);
+
+    // Global variables (similar to Phaser)
+    let callQueue = []; // Stores call objects currently in the queue (queued or ringing)
+    let agentNodes = []; // Stores agent objects
+    let links = []; // Stores link objects (Konva.Line) between calls and agents
+    let waves = []; // Stores wave objects (Konva.Circle) emanating from busy agents
+    let exitingPairs = []; // Stores objects for answered call/agent pairs that are exiting the screen
+
+    // Arrays to manage calls that are in the process of exiting after hangup or divert
+    let hungupCalls = [];
+    let divertedCalls = [];
+
+    let waveTimer = 0; // Timer for creating new waves
+    let callCounter = 0; // Increments for unique call IDs
+
+    // Statistics counters
+    let totalCalls = 0;
+    let answeredCalls = 0;
+    let abandonedCalls = 0;
+    let divertedCallsCount = 0;
+
+    /**
+     * Generates a random integer between min and max (inclusive).
+     * @param {number} min The minimum value.
+     * @param {number} max The maximum value.
+     * @returns {number} A random integer.
+     */
+    function getRandomInt(min, max) {
+        min = Math.ceil(min);
+        max = Math.floor(max);
+        return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    /**
+     * Shuffles an array in place using the Fisher-Yates (Knuth) algorithm.
+     * @param {Array} array The array to shuffle.
+     */
+    function shuffleArray(array) {
+        for (let i = array.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [array[i], array[j]] = [array[j], array[i]]; // ES6 swap
+        }
+    }
+
+    /**
+     * Updates the call statistics displayed in the DOM.
+     */
+    function updateCallStats() {
+      document.getElementById('totalCalls').textContent = totalCalls;
+      document.getElementById('answeredCalls').textContent = answeredCalls;
+      document.getElementById('abandonedCalls').textContent = abandonedCalls;
+      document.getElementById('divertedCalls').textContent = divertedCallsCount;
+    }
+
+    /**
+     * Initializes the simulation elements: creates agents and sets up event listeners.
+     */
+    function createSimulationElements() {
+      // Create 256 agents, distributed between the top and bottom sections of the screen
+      for (let i = 0; i < 256; i++) {
+        // Use custom getRandomInt function
+        const x = getRandomInt(20, stage.width() - 20);
+        // Place agents in top 100px or bottom 100px of the screen
+        const y = (i < 128) ? getRandomInt(20, 100) : getRandomInt(stage.height() - 100, stage.height() - 20);
+
+        // Create a Konva Circle shape for the agent
+        const agentCircle = new Konva.Circle({
+          x: x,
+          y: y,
+          radius: 5,
+          fill: '#ffffff', // Default agent color (white)
+          draggable: true, // Allow agents to be dragged by the user
+        });
+
+        // Store agent data in a plain JavaScript object
+        const agent = {
+          id: i + 1,
+          x: x, // Current X position
+          y: y, // Current Y position
+          homeX: x, // Desired X position when not busy
+          homeY: y, // Desired Y position when not busy
+          radius: 5, // Current radius
+          baseRadius: 5, // Base radius
+          color: '#ffffff', // Current color (for internal tracking)
+          type: 'agent',
+          vx: 0, // Velocity X for force-based movement
+          vy: 0, // Velocity Y for force-based movement
+          isBusy: false, // Flag indicating if the agent is busy with a call
+          konvaShape: agentCircle, // Reference to the Konva Circle object
+        };
+        agentNodes.push(agent); // Add agent to the global list
+        layer.add(agentCircle); // Add the Konva shape to the layer for rendering
+
+        // Event listener for dragging agents
+        agentCircle.on('dragmove', function() {
+          // Update the agent's data object with its new position
+          agent.x = this.x();
+          agent.y = this.y();
+          // Reset velocities to stop physics-based movement while dragging
+          agent.vx = 0;
+          agent.vy = 0;
+        });
+      }
+
+      updateCallStats(); // Initialize call statistics display
+      layer.batchDraw(); // Perform an initial draw to render all elements
+    }
+
+    /**
+     * Handles window resizing: adjusts the Konva stage size and repositions elements.
+     */
+    function resize() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+
+      stage.width(width);
+      stage.height(height);
+
+      // Update the Y position of calls in the queue to be centered vertically
+      callQueue.forEach(call => {
+        // Only update if the call is still active in the queue, not exiting
+        if (call.state === 'queued' || call.state === 'ringing') {
+            call.y = height / 2;
+            if (call.konvaShape) {
+                call.konvaShape.y(height / 2);
+                if (call.textObject) {
+                    call.textObject.y(height / 2);
+                }
+            }
+        }
+      });
+
+      // Update the homeY positions of agents based on the new screen height
+      const halfHeight = height / 2;
+      agentNodes.forEach(agent => {
+        if (agent.homeY < stage.height() / 2) { // If agent was in top half
+          agent.homeY = getRandomInt(20, 100); // Use custom getRandomInt
+        } else { // If agent was in bottom half
+          agent.homeY = getRandomInt(height - 100, height - 20); // Use custom getRandomInt
+        }
+        // Current x,y will naturally gravitate back to homeX,homeY via applyForces
+      });
+
+      reorderQueue(); // Reorder the call queue to adjust x positions based on the new width
+      layer.batchDraw(); // Redraw the layer to reflect changes
+    }
+    // Attach the resize function to the window's resize event
+    window.addEventListener('resize', resize);
+
+
+    /**
+     * Reorders the call queue horizontally, adjusting the targetX for each call.
+     */
+    function reorderQueue() {
+        const spacing = 40; // Horizontal spacing between calls in the queue
+        // Calculate the starting X position for the right-most call in the queue
+        // Shifts left by 300 pixels from the right edge of the stage
+        const startX = stage.width() - 300;
+        // Filter for calls that are still queued or ringing (active in the queue)
+        const activeQueue = callQueue.filter(c => c.state === 'queued' || c.state === 'ringing');
+        for (let i = 0; i < activeQueue.length; i++) {
+            // Calculate targetX: right-most call is at startX, others move left by spacing
+            activeQueue[i].targetX = startX - (activeQueue.length - 1 - i) * spacing;
+        }
+    }
+
+    /**
+     * Handles the "Start Call" button click: adds a new call to the queue.
+     */
+    document.getElementById('startBtn').onclick = () => {
+      callCounter++; // Increment call ID counter
+      totalCalls++; // Increment total calls statistic
+      updateCallStats(); // Update the displayed statistics
+
+      // Create a new call data object
+      const newCall = {
+        id: callCounter,
+        x: -50, // Start off-screen to the left for entrance animation
+        y: stage.height() / 2, // Centered vertically
+        radius: 0, // Start with 0 radius for growing animation
+        targetRadius: 15, // Desired final radius
+        color: '#ffffff', // Default call color (white)
+        type: 'call',
+        vx: 0, // Velocity X
+        vy: 0, // Velocity Y
+        fixed: true, // Calls in the queue are fixed horizontally (not subject to all forces)
+        state: 'queued', // Initial state
+      };
+
+      // Create Konva Circle for the call's visual representation
+      const callCircle = new Konva.Circle({
+        x: newCall.x,
+        y: newCall.y,
+        radius: newCall.radius,
+        fill: newCall.color,
+      });
+      layer.add(callCircle); // Add the circle to the Konva layer
+      newCall.konvaShape = callCircle; // Store reference to the Konva shape
+
+      // Create Konva Text for the call's ID
+      const callText = new Konva.Text({
+        x: newCall.x,
+        y: newCall.y,
+        text: newCall.id.toString(), // Convert ID to string
+        fontSize: 12,
+        fill: '#000000', // Black text for visibility on white circle
+        align: 'center',
+        verticalAlign: 'middle',
+      });
+      // Adjust text origin to be centered on the circle
+      callText.offsetX(callText.width() / 2);
+      callText.offsetY(callText.height() / 2);
+      layer.add(callText); // Add the text to the Konva layer
+      newCall.textObject = callText; // Store reference to the Konva text object
+
+      callQueue.unshift(newCall); // Add the new call to the beginning of the queue array
+      reorderQueue(); // Recalculate target positions for all calls in the queue
+      layer.batchDraw(); // Redraw the layer to show the new call
+    };
+
+    /**
+     * Handles the "Ring Agents" button click: initiates ringing for the last queued call.
+     */
+    document.getElementById('ringBtn').onclick = () => {
+      // Get all calls that are currently in the 'queued' state
+      const queuedCalls = callQueue.filter(c => c.state === 'queued');
+      if (queuedCalls.length === 0) return; // If no queued calls, do nothing
+
+      // Get the right-most call in the queue (the one that arrived earliest)
+      const nextInQueue = queuedCalls[queuedCalls.length - 1];
+
+      // Find all agents that are currently not busy
+      const freeAgents = agentNodes.filter(a => !a.isBusy);
+      if (freeAgents.length === 0) return; // If no free agents, do nothing
+
+      nextInQueue.state = 'ringing'; // Change the call's state to 'ringing'
+      nextInQueue.konvaShape.fill('#00ffff'); // Change call color to Cyan
+      nextInQueue.color = '#00ffff'; // Update internal color
+
+      // Select a random number of free agents (between 1 and 10, or max available)
+      const numToSelect = getRandomInt(1, Math.min(10, freeAgents.length)); // Use custom getRandomInt
+      shuffleArray(freeAgents); // Use custom shuffleArray
+
+      for (let i = 0; i < numToSelect; i++) {
+        const agent = freeAgents[i];
+        agent.isBusy = true; // Mark agent as busy
+        agent.konvaShape.fill('#00ffff'); // Change agent color to Cyan
+        agent.color = '#00ffff'; // Update internal color
+
+        // Create a Konva Line shape for the link between the call and the agent
+        const linkLine = new Konva.Line({
+          // Use the Konva shape's current visual position for the line's start point
+          points: [nextInQueue.konvaShape.x(), nextInQueue.konvaShape.y(), agent.x, agent.y], // Initial points
+          stroke: '#00ffff', // Cyan stroke for the link
+          strokeWidth: 2,
+          opacity: 0.2, // Semi-transparent
+          listening: false, // Links should not be interactive
+        });
+        layer.add(linkLine); // Add the link line to the Konva layer
+        linkLine.moveToBottom(); // Ensure lines are rendered behind circles
+
+        // Store the link object, including references to source/target data and Konva shape
+        links.push({ source: nextInQueue, target: agent, konvaShape: linkLine });
+      }
+      layer.batchDraw(); // Redraw the layer to show new colors and links
+    };
+
+    /**
+     * Handles the "Answer Call" button click: answers the last ringing call and creates an exiting pair.
+     */
+    document.getElementById('answerBtn').onclick = () => {
+      // Get all calls that are currently in the 'ringing' state
+      const ringingCalls = callQueue.filter(c => c.state === 'ringing');
+      if (ringingCalls.length === 0) return; // If no ringing calls, do nothing
+
+      // Get the right-most ringing call (the one that started ringing earliest)
+      const answeringCall = ringingCalls[ringingCalls.length - 1];
+
+      // Find all links (and thus agents) associated with this answering call
+      const agentsForCall = links.filter(l => l.source === answeringCall).map(l => l.target);
+      if (agentsForCall.length === 0) return; // Should not happen if a call is ringing
+
+      answeringCall.state = 'answered'; // Change the call's state to 'answered'
+      answeringCall.konvaShape.fill('#00ff00'); // Change call color to Green
+      answeringCall.color = '#00ff00'; // Update internal color
+      answeredCalls++; // Increment answered calls statistic
+      updateCallStats(); // Update the displayed statistics
+
+      // Choose the first agent from the linked agents to be the one that 'answers'
+      const chosenAgent = agentsForCall.shift();
+      chosenAgent.konvaShape.fill('#00ff00'); // Change chosen agent color to Green
+      chosenAgent.color = '#00ff00'; // Update internal color
+
+      // Free up any other agents that were also ringing for this call but didn't 'answer'
+      for (const agent of agentsForCall) {
+        agent.isBusy = false; // Mark agent as not busy
+        agent.konvaShape.fill('#ffffff'); // Reset agent color to white
+        agent.color = '#ffffff'; // Update internal color
+      }
+
+      // Create copies of the call and agent data for the exiting animation
+      const pairedCall = { ...answeringCall };
+      const pairedAgent = { ...chosenAgent };
+
+      // Create an object to manage the exiting pair animation
+      const exitingPair = {
+        call: pairedCall,
+        agent: pairedAgent,
+        state: 'approaching', // Initial state: agent approaches call
+        speed: 10, // Speed of exit animation
+        originalCall: answeringCall, // Reference to the original call object (for later removal)
+        originalAgent: chosenAgent, // Reference to the original agent object (for later re-adding)
+        startX: answeringCall.konvaShape.x(), // Store initial X position for queue shifting
+      };
+
+      // Transfer the Konva text object from the original call to the exiting pair's call
+      if (answeringCall.textObject) {
+        exitingPair.call.textObject = answeringCall.textObject;
+        answeringCall.textObject = null; // Clear reference from original call to prevent double-destruction
+      }
+
+      exitingPairs.push(exitingPair); // Add the exiting pair to the global list
+
+      // Remove the answered call from the main callQueue array
+      const callIdx = callQueue.indexOf(answeringCall);
+      if (callIdx > -1) {
+          callQueue.splice(callIdx, 1);
+      }
+
+      // IMPORTANT: DO NOT call reorderQueue() here. It will be called AFTER the answered call exits.
+
+      // Remove the chosen agent from the active agentNodes array (temporarily, until it returns)
+      const agentIndex = agentNodes.indexOf(chosenAgent);
+      if (agentIndex > -1) agentNodes.splice(agentIndex, 1);
+
+      // Remove all Konva Line shapes associated with the answered call
+      links = links.filter(l => {
+        if (l.source === answeringCall) {
+          l.konvaShape.destroy(); // Remove the Konva Line shape from the layer
+          return false; // Filter out this link
+        }
+        return true; // Keep other links
+      });
+
+      layer.batchDraw(); // Redraw the layer
+    };
+
+    /**
+     * Handles the "Hangup Call" button click: randomly selects and "hangs up" a queued or ringing call.
+     */
+    document.getElementById('hangupBtn').onclick = () => {
+      // Get calls that are still in 'queued' or 'ringing' states
+      const availableCalls = callQueue.filter(c => c.state === 'queued' || c.state === 'ringing');
+      if (availableCalls.length === 0) return; // If no such calls, do nothing
+
+      // Select a random call from the available ones
+      const call = availableCalls[getRandomInt(0, availableCalls.length - 1)]; // Use custom getRandomInt
+
+      // Remove the call from the main callQueue array
+      const callInQueueIndex = callQueue.indexOf(call);
+      if (callInQueueIndex > -1) callQueue.splice(callInQueueIndex, 1);
+
+      call.state = 'hanged-up'; // Change call state
+      call.exitState = 'moving-up'; // Initial state for the two-stage exit animation (up then left)
+      call.konvaShape.fill('#ff0000'); // Change call color to Red
+      call.color = '#ff0000'; // Update internal color
+      abandonedCalls++; // Increment abandoned calls statistic
+      updateCallStats(); // Update displayed statistics
+
+      // Free up any agents that were linked to this hung-up call
+      links.filter(l => l.source === call).forEach(l => {
+        l.target.isBusy = false; // Mark agent as not busy
+        l.target.konvaShape.fill('#ffffff'); // Reset agent color to white
+        l.target.color = '#ffffff'; // Update internal color
+        l.konvaShape.destroy(); // Remove the link line from the layer
+      });
+      links = links.filter(l => l.source !== call); // Remove links associated with this call from the array
+
+      // Add the call to the hungupCalls array for animation and eventual removal
+      hungupCalls.push(call);
+
+      reorderQueue(); // Reorder the remaining calls in the queue
+      layer.batchDraw(); // Redraw the layer
+    };
+
+    /**
+     * Handles the "Divert Call" button click: randomly selects and "diverts" a queued or ringing call.
+     */
+    document.getElementById('divertBtn').onclick = () => {
+      // Get calls that are still in 'queued' or 'ringing' states
+      const availableCalls = callQueue.filter(c => c.state === 'queued' || c.state === 'ringing');
+      if (availableCalls.length === 0) return; // If no such calls, do nothing
+
+      // Select a random call from the available ones
+      const call = availableCalls[getRandomInt(0, availableCalls.length - 1)]; // Use custom getRandomInt
+
+      // Remove the call from the main callQueue array
+      const callInQueueIndex = callQueue.indexOf(call);
+      if (callInQueueIndex > -1) callQueue.splice(callInQueueIndex, 1);
+
+      call.state = 'diverted'; // Change call state
+      call.exitState = 'moving-down'; // Initial state for the two-stage exit animation (down then right)
+      call.konvaShape.fill('#ffff00'); // Change call color to Yellow
+      call.color = '#ffff00'; // Update internal color
+      divertedCallsCount++; // Increment diverted calls statistic
+      updateCallStats(); // Update displayed statistics
+
+      // Free up any agents that were linked to this diverted call
+      links.filter(l => l.source === call).forEach(l => {
+        l.target.isBusy = false; // Mark agent as not busy
+        l.target.konvaShape.fill('#ffffff'); // Reset agent color to white
+        l.target.color = '#ffffff'; // Update internal color
+        l.konvaShape.destroy(); // Remove the link line from the layer
+      });
+      links = links.filter(l => l.source !== call); // Remove links associated with this call from the array
+
+      // Add the call to the divertedCalls array for animation and eventual removal
+      divertedCalls.push(call);
+
+      reorderQueue(); // Reorder the remaining calls in the queue
+      layer.batchDraw(); // Redraw the layer
+    };
+
+
+    /**
+     * Updates the state of 'waves' (expanding circles) originating from busy agents.
+     * Waves expand and fade out over time.
+     * @param {number} delta Time elapsed since last frame in milliseconds.
+     */
+    function updateWaves(delta) {
+      for (let i = waves.length - 1; i >= 0; i--) {
+        const wave = waves[i];
+        const source = agentNodes.find(n => n.id === wave.sourceNodeId); // Find the current agent node
+
+        if (!source || !source.konvaShape) { // If source node or its shape no longer exists, remove the wave
+          if (wave.konvaShape) wave.konvaShape.destroy();
+          waves.splice(i, 1);
+          continue;
+        }
+
+        wave.life += delta; // Accumulate life time
+        const t = wave.life / 1000; // Normalized time (0 to 1 over 1 second)
+        wave.radius = t * wave.maxRadius; // Increase radius
+        wave.alpha = 1 - t; // Decrease opacity
+
+        // Update the Konva Circle's properties with the SOURCE NODE'S CURRENT POSITION
+        if (wave.konvaShape) {
+          wave.konvaShape.x(source.konvaShape.x()); // Update wave X to agent's current X
+          wave.konvaShape.y(source.konvaShape.y()); // Update wave Y to agent's current Y
+          wave.konvaShape.radius(wave.radius);
+          wave.konvaShape.opacity(wave.alpha);
+        }
+
+        // If the wave has faded out completely, remove it
+        if (wave.alpha <= 0) {
+          if (wave.konvaShape) wave.konvaShape.destroy(); // Remove Konva shape from layer
+          waves.splice(i, 1); // Remove from the waves array
+        }
+      }
+    }
+
+    /**
+     * Applies repulsion and spring forces between active nodes (ringing calls and busy agents).
+     * This creates a dynamic, spread-out visualization for connected elements.
+     */
+    function applyForces() {
+      const repulsionConstant = 2000; // Strength of repulsion force
+      const springStiffness = 0.01; // Stiffness of the spring force
+      const springLength = 250; // Desired distance between linked nodes
+
+      // Identify all nodes that are currently active (ringing calls or busy agents)
+      const activeNodes = [
+        ...agentNodes.filter(a => a.isBusy)
+      ];
+
+      // Initialize velocities for active nodes if they don't exist
+      activeNodes.forEach(node => {
+        node.vx = node.vx || 0;
+        node.vy = node.vy || 0;
+      });
+
+      // Apply repulsion forces between all pairs of active nodes
+      for (let i = 0; i < activeNodes.length; i++) {
+        for (let j = i + 1; j < activeNodes.length; j++) {
+          const a = activeNodes[i], b = activeNodes[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          // Calculate distance, adding a small epsilon to avoid division by zero
+          const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+          const force = repulsionConstant / (dist * dist); // Inverse square law for repulsion
+          const fx = force * dx / dist; // X component of force
+          const fy = force * dy / dist; // Y component of force
+
+          // Apply forces, ensuring nodes are not fixed (e.g., calls in queue) and not being dragged
+          if (!a.fixed && !a.konvaShape.isDragging()) { a.vx -= fx; a.vy -= fy; }
+          if (!b.fixed && !b.konvaShape.isDragging()) { b.vx += fx; b.vy += fy; }
+        }
+      }
+
+      // Apply spring forces between linked nodes (call and agent)
+      for (const link of links) {
+        const a = link.source, b = link.target;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const dist = Math.sqrt(dx * dx + dy * dy) + 0.01;
+        const force = springStiffness * (dist - springLength); // Force proportional to displacement from springLength
+        const fx = force * dx / dist;
+        const fy = force * dy / dist;
+
+        // Apply forces, again checking for fixed and dragging states
+        // Calls are fixed, so they won't move due to these forces, but agents will.
+        if (!a.fixed && !a.konvaShape.isDragging()) { a.vx += fx; a.vy += fy; }
+        if (!b.fixed && !b.konvaShape.isDragging()) { b.vx -= fx; b.vy -= fy; }
+      }
+    }
+
+    /**
+     * Updates node positions based on calculated velocities and home positions.
+     * Also clamps positions to stay within stage boundaries.
+     */
+    function updatePositions() {
+      // Update agent positions
+      for (const node of agentNodes) {
+        if (node.isBusy) {
+          node.vx *= 0.9; // Apply damping to velocities
+          node.vy *= 0.9;
+          node.x += node.vx; // Update position based on velocity
+          node.y += node.vy;
+        } else {
+          // If not busy, move agents back to their 'home' positions with a spring-like effect
+          const dx = node.homeX - node.x;
+          const dy = node.homeY - node.y;
+          if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
+            node.x += dx * 0.05;
+            node.y += dy * 0.05;
+          } else {
+            // Snap to home if close enough to prevent jittering
+            node.x = node.homeX;
+            node.y = node.homeY;
+          }
+        }
+        // Clamp positions to ensure nodes stay within the visible stage area
+        node.x = Math.max(0, Math.min(node.x, stage.width()));
+        node.y = Math.max(0, Math.min(node.y, stage.height()));
+
+        // Update the Konva shape's position
+        node.konvaShape.x(node.x);
+        node.konvaShape.y(node.y);
+      }
+    }
+
+    /**
+     * Main animation loop for Konva. This function is called repeatedly by Konva.Animation.
+     * It handles all simulation updates and triggers redrawing of the layer.
+     * @param {object} frame The current animation frame data provided by Konva.
+     * @param {number} frame.timeDiff Time elapsed since last frame in milliseconds.
+     */
+    const anim = new Konva.Animation(function(frame) {
+      const delta = frame.timeDiff; // Delta time in milliseconds for frame-rate independent updates
+
+      // Wave generation logic
+      waveTimer += delta;
+      if (waveTimer >= 500) { // Every 500ms, generate waves from busy agents
+        waveTimer = 0;
+        for (const node of agentNodes.filter(a => a.isBusy)) {
+          // Create a new Konva Circle for the wave visual
+          const waveCircle = new Konva.Circle({
+            x: node.x,
+            y: node.y,
+            radius: 0, // Start with 0 radius
+            stroke: '#ffffff', // White stroke
+            strokeWidth: 2,
+            opacity: 1, // Start fully opaque
+            listening: false, // Waves should not be interactive
+          });
+          layer.add(waveCircle); // Add wave to the layer
+          waveCircle.moveToBottom(); // Ensure waves are drawn behind other circles
+
+          // Store wave data, linking it to the source node
+          waves.push({
+            sourceNodeId: node.id,
+            sourceNode: node, // Store reference to the actual node for live position updates
+            radius: 0,
+            maxRadius: 40, // Max radius the wave will reach
+            alpha: 1,
+            life: 0, // Current life time of the wave
+            konvaShape: waveCircle, // Reference to the Konva shape
+          });
+        }
+      }
+
+      updateWaves(delta); // Update existing waves (expand and fade)
+      applyForces(); // Calculate forces between active nodes
+      updatePositions(); // Apply forces and move nodes (primarily for agents)
+
+      // Update calls currently in the queue (queued or ringing)
+      // Iterate backwards to allow safe removal of items.
+      for (let i = callQueue.length - 1; i >= 0; i--) {
+        const call = callQueue[i];
+
+        // Grow the call circle's radius until it reaches targetRadius
+        if (call.konvaShape.radius() < call.targetRadius) {
+          call.konvaShape.radius(call.konvaShape.radius() + 1);
+        }
+
+        // Handle horizontal movement towards the targetX for queued/ringing calls
+        if (call.targetX !== undefined && call.konvaShape.x() !== call.targetX) {
+          const dx = call.targetX - call.konvaShape.x();
+          if (Math.abs(dx) < 0.5) { // If very close, snap to target
+            call.konvaShape.x(call.targetX);
+          } else {
+            // Smoothly move towards targetX
+            call.konvaShape.x(call.konvaShape.x() + dx * 0.1);
+          }
+        }
+        // IMPORTANT: Update the internal data model's x and y to match the Konva shape's position
+        call.x = call.konvaShape.x();
+        call.y = call.konvaShape.y();
+        // Update text position to match the circle
+        if (call.textObject) {
+          call.textObject.x(call.konvaShape.x());
+          call.textObject.y(call.konvaShape.y());
+        }
+      }
+
+      // --- Handle hung-up calls exit animations ---
+      for (let i = hungupCalls.length - 1; i >= 0; i--) {
+        const call = hungupCalls[i];
+        if (!call.konvaShape) { // Safety check
+            hungupCalls.splice(i, 1);
+            continue;
+        }
+
+        // Update internal data model x, y
+        call.x = call.konvaShape.x();
+        call.y = call.konvaShape.y();
+
+        if (call.textObject) {
+            call.textObject.x(call.konvaShape.x());
+            call.textObject.y(call.konvaShape.y());
+        }
+
+        if (call.exitState === 'moving-up') {
+            call.konvaShape.y(call.konvaShape.y() - 10); // Move upwards
+            if (call.textObject) call.textObject.y(call.textObject.y() - 10);
+            if (call.konvaShape.y() < stage.height() / 2 - 50) { // If reached upper threshold
+                call.exitState = 'moving-left'; // Transition to moving left
+            }
+        } else if (call.exitState === 'moving-left') {
+            call.konvaShape.x(call.konvaShape.x() - 15); // Move leftwards
+            if (call.textObject) call.textObject.x(call.textObject.x() - 15);
+            if (call.konvaShape.x() < -100) { // Off-screen to the left
+                if (call.konvaShape) call.konvaShape.destroy(); // Destroy Konva shape
+                if (call.textObject) call.textObject.destroy(); // Destroy Konva text
+                hungupCalls.splice(i, 1); // Remove from array
+            }
+        }
+      }
+
+      // --- Handle diverted calls exit animations ---
+      for (let i = divertedCalls.length - 1; i >= 0; i--) {
+        const call = divertedCalls[i];
+        if (!call.konvaShape) { // Safety check
+            divertedCalls.splice(i, 1);
+            continue;
+        }
+
+        // Update internal data model x, y
+        call.x = call.konvaShape.x();
+        call.y = call.konvaShape.y();
+
+        if (call.textObject) {
+            call.textObject.x(call.konvaShape.x());
+            call.textObject.y(call.konvaShape.y());
+        }
+
+        if (call.exitState === 'moving-down') {
+            call.konvaShape.y(call.konvaShape.y() + 10); // Move downwards
+            if (call.textObject) call.textObject.y(call.textObject.y() + 10);
+            if (call.konvaShape.y() > stage.height() / 2 + 50) { // If reached lower threshold
+                call.exitState = 'moving-right'; // Transition to moving right
+            }
+        } else if (call.exitState === 'moving-right') {
+            call.konvaShape.x(call.konvaShape.x() + 15); // Move rightwards
+            if (call.textObject) call.textObject.x(call.textObject.x() + 15);
+            if (call.konvaShape.x() > stage.width() + 100) { // Off-screen to the right
+                if (call.konvaShape) call.konvaShape.destroy(); // Destroy Konva shape
+                if (call.textObject) call.textObject.destroy(); // Destroy Konva text
+                divertedCalls.splice(i, 1); // Remove from array
+            }
+        }
+      }
+
+      // Update exiting pairs (answered calls and agents moving off-screen together)
+      for (let i = exitingPairs.length - 1; i >= 0; i--) {
+        const exitingPair = exitingPairs[i];
+
+        const callShape = exitingPair.call.konvaShape;
+        const agentShape = exitingPair.agent.konvaShape;
+        const callText = exitingPair.call.textObject;
+
+        // Basic check if shapes somehow got destroyed prematurely
+        if (!callShape || !agentShape) {
+            exitingPairs.splice(i, 1);
+            continue;
+        }
+
+        // Update internal data model x, y for the exiting pair's call and agent
+        exitingPair.call.x = callShape.x();
+        exitingPair.call.y = callShape.y();
+        exitingPair.agent.x = agentShape.x();
+        exitingPair.agent.y = agentShape.y();
+
+
+        // Update text position to follow the call circle
+        if (callText) {
+          callText.x(callShape.x());
+          callText.y(callShape.y());
+        }
+
+        if (exitingPair.state === 'approaching') {
+          // Agent moves towards the call
+          const targetX = callShape.x() + 30; // Agent approaches call, slightly to its right
+          const targetY = callShape.y();
+
+          const dx = targetX - agentShape.x();
+          const dy = targetY - agentShape.y();
+          const distance = Math.sqrt(dx*dx + dy*dy);
+
+          if (distance < 5) { // If agent is close enough to the target
+            agentShape.x(targetX); // Snap to target
+            agentShape.y(targetY);
+            exitingPair.state = 'exiting'; // Transition to exiting state
+          } else {
+            // Move agent smoothly towards the target
+            agentShape.x(agentShape.x() + dx * 0.05);
+            agentShape.y(agentShape.y() + dy * 0.05);
+          }
+        } else if (exitingPair.state === 'exiting') {
+          // Both call and agent move off-screen to the right
+          callShape.x(callShape.x() + exitingPair.speed);
+          agentShape.x(agentShape.x() + exitingPair.speed);
+
+          if (callShape.x() > stage.width() + 50) { // If both are off-screen
+            callShape.destroy(); // Remove Konva call shape
+            agentShape.destroy(); // Remove Konva agent shape
+            if (callText) callText.destroy(); // Remove Konva text
+
+            // Re-add the original agent back to the active agent pool
+            const originalAgent = exitingPair.originalAgent;
+            if (originalAgent) {
+              originalAgent.isBusy = false; // Mark as not busy
+              originalAgent.konvaShape.fill('#ffffff'); // Reset color
+              originalAgent.color = '#ffffff';
+              agentNodes.push(originalAgent); // Add back to agent list
+              layer.add(originalAgent.konvaShape); // Add back to layer
+            }
+            exitingPairs.splice(i, 1); // Remove from exiting pairs array
+
+            // IMPORTANT: Call reorderQueue() ONLY when the answered call has fully exited.
+            reorderQueue();
+          }
+        }
+      }
+
+      // Update Konva Lines for links: ensure they connect the current positions of source and target
+      for (const link of links) {
+        if (link.konvaShape) {
+          // These now correctly use the updated .x and .y from the data objects
+          link.konvaShape.points([link.source.x, link.source.y, link.target.x, link.target.y]);
+        }
+      }
+
+      layer.batchDraw(); // Optimize drawing: redraw all changes on the layer at once
+    });
+
+    // Start the simulation
+    createSimulationElements(); // Initialize agents and initial state
+    anim.start(); // Begin the Konva animation loop
+  </script>
+</body>
+</html>
+
