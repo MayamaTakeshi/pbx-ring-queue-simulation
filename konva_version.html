@@ -138,6 +138,38 @@
       document.getElementById('divertedCalls').textContent = divertedCallsCount;
     }
 
+    function createAgentLabel(agent) {
+      const label = new Konva.Text({
+        x: agent.x,
+        y: agent.y - 22,
+        text: agent.name,
+        fontSize: 12,
+        fontFamily: 'Inter, Arial, sans-serif',
+        fill: '#ffffff',
+        align: 'center',
+        listening: false,
+      });
+      label.offsetX(label.width() / 2);
+      return label;
+    }
+
+    function updateAgentLabelPosition(agent) {
+      if (!agent.labelObject) return;
+      agent.labelObject.x(agent.konvaShape.x());
+      agent.labelObject.y(agent.konvaShape.y() - 22);
+    }
+
+    function ensureAgentLabel(agent) {
+      if (!agent.labelObject) {
+        agent.labelObject = createAgentLabel(agent);
+      }
+      updateAgentLabelPosition(agent);
+      if (!agent.labelObject.getLayer()) {
+        layer.add(agent.labelObject);
+      }
+      agent.labelObject.moveToTop();
+    }
+
     /**
      * Initializes the simulation elements: creates agents and sets up event listeners.
      */
@@ -161,6 +193,7 @@
         // Store agent data in a plain JavaScript object
         const agent = {
           id: i + 1,
+          name: `Agent ${i + 1}`,
           x: x, // Current X position
           y: y, // Current Y position
           homeX: x, // Desired X position when not busy
@@ -173,15 +206,19 @@
           vy: 0, // Velocity Y for force-based movement
           isBusy: false, // Flag indicating if the agent is busy with a call
           konvaShape: agentCircle, // Reference to the Konva Circle object
+          labelObject: null, // Reference to the Konva Text label
         };
+        agent.labelObject = createAgentLabel(agent);
         agentNodes.push(agent); // Add agent to the global list
         layer.add(agentCircle); // Add the Konva shape to the layer for rendering
+        layer.add(agent.labelObject); // Add the label to the layer for rendering
 
         // Event listener for dragging agents
         agentCircle.on('dragmove', function() {
           // Update the agent's data object with its new position
           agent.x = this.x();
           agent.y = this.y();
+          updateAgentLabelPosition(agent);
           // Reset velocities to stop physics-based movement while dragging
           agent.vx = 0;
           agent.vy = 0;
@@ -632,6 +669,7 @@
         // Update the Konva shape's position
         node.konvaShape.x(node.x);
         node.konvaShape.y(node.y);
+        updateAgentLabelPosition(node);
       }
     }
 
@@ -784,6 +822,7 @@
         const callShape = exitingPair.call.konvaShape;
         const agentShape = exitingPair.agent.konvaShape;
         const callText = exitingPair.call.textObject;
+        const agentLabel = exitingPair.agent.labelObject;
 
         // Basic check if shapes somehow got destroyed prematurely
         if (!callShape || !agentShape) {
@@ -803,6 +842,10 @@
           callText.x(callShape.x());
           callText.y(callShape.y());
         }
+        if (agentLabel) {
+          agentLabel.x(agentShape.x());
+          agentLabel.y(agentShape.y() - 22);
+        }
 
         if (exitingPair.state === 'approaching') {
           // Agent moves towards the call
@@ -816,21 +859,34 @@
           if (distance < 5) { // If agent is close enough to the target
             agentShape.x(targetX); // Snap to target
             agentShape.y(targetY);
+            if (agentLabel) {
+              agentLabel.x(agentShape.x());
+              agentLabel.y(agentShape.y() - 22);
+            }
             exitingPair.state = 'exiting'; // Transition to exiting state
           } else {
             // Move agent smoothly towards the target
             agentShape.x(agentShape.x() + dx * 0.05);
             agentShape.y(agentShape.y() + dy * 0.05);
+            if (agentLabel) {
+              agentLabel.x(agentShape.x());
+              agentLabel.y(agentShape.y() - 22);
+            }
           }
         } else if (exitingPair.state === 'exiting') {
           // Both call and agent move off-screen to the right
           callShape.x(callShape.x() + exitingPair.speed);
           agentShape.x(agentShape.x() + exitingPair.speed);
+          if (agentLabel) {
+            agentLabel.x(agentShape.x());
+            agentLabel.y(agentShape.y() - 22);
+          }
 
           if (callShape.x() > stage.width() + 50) { // If both are off-screen
             callShape.destroy(); // Remove Konva call shape
             agentShape.destroy(); // Remove Konva agent shape
             if (callText) callText.destroy(); // Remove Konva text
+            if (agentLabel) agentLabel.destroy(); // Remove Konva agent label
 
             // Re-add the original agent back to the active agent pool
             const originalAgent = exitingPair.originalAgent;
@@ -838,8 +894,10 @@
               originalAgent.isBusy = false; // Mark as not busy
               originalAgent.konvaShape.fill('#ffffff'); // Reset color
               originalAgent.color = '#ffffff';
+              originalAgent.labelObject = null;
               agentNodes.push(originalAgent); // Add back to agent list
               layer.add(originalAgent.konvaShape); // Add back to layer
+              ensureAgentLabel(originalAgent);
             }
             exitingPairs.splice(i, 1); // Remove from exiting pairs array
 
@@ -866,4 +924,3 @@
   </script>
 </body>
 </html>
-
