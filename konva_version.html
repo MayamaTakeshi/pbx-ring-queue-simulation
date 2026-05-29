@@ -484,7 +484,7 @@
       const freeAgents = agentNodes.filter(a => !a.isBusy);
       if (freeAgents.length === 0) return;
 
-      const answeringCall = ringingCalls[ringingCalls.length - 1];
+      const answeringCall = ringingCalls[getRandomInt(0, ringingCalls.length - 1)];
       const agentsForCall = links.filter(l => l.source === answeringCall).map(l => l.target);
       const chosenAgent = freeAgents[getRandomInt(0, freeAgents.length - 1)];
       answerCallWithAgent(answeringCall, chosenAgent, agentsForCall);
@@ -500,7 +500,7 @@
       const freeAgents = agentNodes.filter(a => !a.isBusy);
       if (freeAgents.length === 0) return;
 
-      const answeringCall = queuedCalls[queuedCalls.length - 1];
+      const answeringCall = queuedCalls[getRandomInt(0, queuedCalls.length - 1)];
       const chosenAgent = freeAgents[getRandomInt(0, freeAgents.length - 1)];
       answerCallWithAgent(answeringCall, chosenAgent);
     };
