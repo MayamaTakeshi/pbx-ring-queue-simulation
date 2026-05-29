@@ -866,8 +866,8 @@
             exitingPair.state = 'exiting'; // Transition to exiting state
           } else {
             // Move agent smoothly towards the target
-            agentShape.x(agentShape.x() + dx * 0.05);
-            agentShape.y(agentShape.y() + dy * 0.05);
+            agentShape.x(agentShape.x() + dx * 0.10);
+            agentShape.y(agentShape.y() + dy * 0.10);
             if (agentLabel) {
               agentLabel.x(agentShape.x());
               agentLabel.y(agentShape.y() - 22);
