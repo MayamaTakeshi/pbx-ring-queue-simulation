@@ -276,14 +276,13 @@
      */
     function reorderQueue() {
         const spacing = 40; // Horizontal spacing between calls in the queue
-        // Calculate the starting X position for the right-most call in the queue
-        // Shifts left by 300 pixels from the right edge of the stage
-        const startX = stage.width() - 300;
+        // Calculate the starting X position for the first/oldest call in the queue
+        const startX = 300;
         // Filter for calls that are still queued or ringing (active in the queue)
         const activeQueue = callQueue.filter(c => c.state === 'queued' || c.state === 'ringing');
         for (let i = 0; i < activeQueue.length; i++) {
-            // Calculate targetX: right-most call is at startX, others move left by spacing
-            activeQueue[i].targetX = startX - (activeQueue.length - 1 - i) * spacing;
+            // Calculate targetX: first/oldest call is at startX, newer calls extend right
+            activeQueue[i].targetX = startX + (activeQueue.length - 1 - i) * spacing;
         }
     }
 
@@ -298,7 +297,7 @@
       // Create a new call data object
       const newCall = {
         id: callCounter,
-        x: -50, // Start off-screen to the left for entrance animation
+        x: stage.width() + 50, // Start off-screen to the right for entrance animation
         y: stage.height() / 2, // Centered vertically
         radius: 0, // Start with 0 radius for growing animation
         targetRadius: 15, // Desired final radius
@@ -349,7 +348,7 @@
       const queuedCalls = callQueue.filter(c => c.state === 'queued');
       if (queuedCalls.length === 0) return; // If no queued calls, do nothing
 
-      // Get the right-most call in the queue (the one that arrived earliest)
+      // Get the left-most call in the queue (the one that arrived earliest)
       const nextInQueue = queuedCalls[queuedCalls.length - 1];
 
       // Find all agents that are currently not busy
@@ -396,7 +395,7 @@
       const ringingCalls = callQueue.filter(c => c.state === 'ringing');
       if (ringingCalls.length === 0) return; // If no ringing calls, do nothing
 
-      // Get the right-most ringing call (the one that started ringing earliest)
+      // Get the left-most ringing call (the one that started ringing earliest)
       const answeringCall = ringingCalls[ringingCalls.length - 1];
 
       // Find all links (and thus agents) associated with this answering call
@@ -484,7 +483,7 @@
       if (callInQueueIndex > -1) callQueue.splice(callInQueueIndex, 1);
 
       call.state = 'hanged-up'; // Change call state
-      call.exitState = 'moving-up'; // Initial state for the two-stage exit animation (up then left)
+      call.exitState = 'moving-up'; // Initial state for the two-stage exit animation (up then right)
       call.konvaShape.fill('#ff0000'); // Change call color to Red
       call.color = '#ff0000'; // Update internal color
       abandonedCalls++; // Increment abandoned calls statistic
@@ -522,7 +521,7 @@
       if (callInQueueIndex > -1) callQueue.splice(callInQueueIndex, 1);
 
       call.state = 'diverted'; // Change call state
-      call.exitState = 'moving-down'; // Initial state for the two-stage exit animation (down then right)
+      call.exitState = 'moving-down'; // Initial state for the two-stage exit animation (down then left)
       call.konvaShape.fill('#ffff00'); // Change call color to Yellow
       call.color = '#ffff00'; // Update internal color
       divertedCallsCount++; // Increment diverted calls statistic
@@ -768,12 +767,12 @@
             call.konvaShape.y(call.konvaShape.y() - 10); // Move upwards
             if (call.textObject) call.textObject.y(call.textObject.y() - 10);
             if (call.konvaShape.y() < stage.height() / 2 - 50) { // If reached upper threshold
-                call.exitState = 'moving-left'; // Transition to moving left
+                call.exitState = 'moving-right'; // Transition to moving right
             }
-        } else if (call.exitState === 'moving-left') {
-            call.konvaShape.x(call.konvaShape.x() - 15); // Move leftwards
-            if (call.textObject) call.textObject.x(call.textObject.x() - 15);
-            if (call.konvaShape.x() < -100) { // Off-screen to the left
+        } else if (call.exitState === 'moving-right') {
+            call.konvaShape.x(call.konvaShape.x() + 15); // Move rightwards
+            if (call.textObject) call.textObject.x(call.textObject.x() + 15);
+            if (call.konvaShape.x() > stage.width() + 100) { // Off-screen to the right
                 if (call.konvaShape) call.konvaShape.destroy(); // Destroy Konva shape
                 if (call.textObject) call.textObject.destroy(); // Destroy Konva text
                 hungupCalls.splice(i, 1); // Remove from array
@@ -802,12 +801,12 @@
             call.konvaShape.y(call.konvaShape.y() + 10); // Move downwards
             if (call.textObject) call.textObject.y(call.textObject.y() + 10);
             if (call.konvaShape.y() > stage.height() / 2 + 50) { // If reached lower threshold
-                call.exitState = 'moving-right'; // Transition to moving right
+                call.exitState = 'moving-left'; // Transition to moving left
             }
-        } else if (call.exitState === 'moving-right') {
-            call.konvaShape.x(call.konvaShape.x() + 15); // Move rightwards
-            if (call.textObject) call.textObject.x(call.textObject.x() + 15);
-            if (call.konvaShape.x() > stage.width() + 100) { // Off-screen to the right
+        } else if (call.exitState === 'moving-left') {
+            call.konvaShape.x(call.konvaShape.x() - 15); // Move leftwards
+            if (call.textObject) call.textObject.x(call.textObject.x() - 15);
+            if (call.konvaShape.x() < -100) { // Off-screen to the left
                 if (call.konvaShape) call.konvaShape.destroy(); // Destroy Konva shape
                 if (call.textObject) call.textObject.destroy(); // Destroy Konva text
                 divertedCalls.splice(i, 1); // Remove from array
@@ -849,7 +848,7 @@
 
         if (exitingPair.state === 'approaching') {
           // Agent moves towards the call
-          const targetX = callShape.x() + 30; // Agent approaches call, slightly to its right
+          const targetX = callShape.x() - 30; // Agent approaches call, slightly to its left
           const targetY = callShape.y();
 
           const dx = targetX - agentShape.x();
@@ -874,15 +873,15 @@
             }
           }
         } else if (exitingPair.state === 'exiting') {
-          // Both call and agent move off-screen to the right
-          callShape.x(callShape.x() + exitingPair.speed);
-          agentShape.x(agentShape.x() + exitingPair.speed);
+          // Both call and agent move off-screen to the left
+          callShape.x(callShape.x() - exitingPair.speed);
+          agentShape.x(agentShape.x() - exitingPair.speed);
           if (agentLabel) {
             agentLabel.x(agentShape.x());
             agentLabel.y(agentShape.y() - 22);
           }
 
-          if (callShape.x() > stage.width() + 50) { // If both are off-screen
+          if (callShape.x() < -50) { // If both are off-screen
             callShape.destroy(); // Remove Konva call shape
             agentShape.destroy(); // Remove Konva agent shape
             if (callText) callText.destroy(); // Remove Konva text
