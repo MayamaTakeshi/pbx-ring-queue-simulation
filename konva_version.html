@@ -64,6 +64,8 @@
     <button id="startBtn">Start Call</button>
     <button id="ringBtn">Ring Agents</button>
     <button id="answerBtn">Answer Call</button>
+    <button id="directRingingAnswerBtn">Direct Ringing Answer</button>
+    <button id="directQueuedAnswerBtn">Direct Queued Answer</button>
     <button id="hangupBtn">Hangup Call</button>
     <button id="divertBtn">Divert Call</button>
   </div>
@@ -387,34 +389,19 @@
       layer.batchDraw(); // Redraw the layer to show new colors and links
     };
 
-    /**
-     * Handles the "Answer Call" button click: answers the last ringing call and creates an exiting pair.
-     */
-    document.getElementById('answerBtn').onclick = () => {
-      // Get all calls that are currently in the 'ringing' state
-      const ringingCalls = callQueue.filter(c => c.state === 'ringing');
-      if (ringingCalls.length === 0) return; // If no ringing calls, do nothing
-
-      // Get the left-most ringing call (the one that started ringing earliest)
-      const answeringCall = ringingCalls[ringingCalls.length - 1];
-
-      // Find all links (and thus agents) associated with this answering call
-      const agentsForCall = links.filter(l => l.source === answeringCall).map(l => l.target);
-      if (agentsForCall.length === 0) return; // Should not happen if a call is ringing
-
+    function answerCallWithAgent(answeringCall, chosenAgent, agentsToFree = []) {
       answeringCall.state = 'answered'; // Change the call's state to 'answered'
       answeringCall.konvaShape.fill('#00ff00'); // Change call color to Green
       answeringCall.color = '#00ff00'; // Update internal color
       answeredCalls++; // Increment answered calls statistic
       updateCallStats(); // Update the displayed statistics
 
-      // Choose the first agent from the linked agents to be the one that 'answers'
-      const chosenAgent = agentsForCall.shift();
+      chosenAgent.isBusy = true;
       chosenAgent.konvaShape.fill('#00ff00'); // Change chosen agent color to Green
       chosenAgent.color = '#00ff00'; // Update internal color
 
       // Free up any other agents that were also ringing for this call but didn't 'answer'
-      for (const agent of agentsForCall) {
+      for (const agent of agentsToFree) {
         agent.isBusy = false; // Mark agent as not busy
         agent.konvaShape.fill('#ffffff'); // Reset agent color to white
         agent.color = '#ffffff'; // Update internal color
@@ -465,6 +452,57 @@
       });
 
       layer.batchDraw(); // Redraw the layer
+    }
+
+    /**
+     * Handles the "Answer Call" button click: answers the last ringing call and creates an exiting pair.
+     */
+    document.getElementById('answerBtn').onclick = () => {
+      // Get all calls that are currently in the 'ringing' state
+      const ringingCalls = callQueue.filter(c => c.state === 'ringing');
+      if (ringingCalls.length === 0) return; // If no ringing calls, do nothing
+
+      // Get the left-most ringing call (the one that started ringing earliest)
+      const answeringCall = ringingCalls[ringingCalls.length - 1];
+
+      // Find all links (and thus agents) associated with this answering call
+      const agentsForCall = links.filter(l => l.source === answeringCall).map(l => l.target);
+      if (agentsForCall.length === 0) return; // Should not happen if a call is ringing
+
+      // Choose the first agent from the linked agents to be the one that 'answers'
+      const chosenAgent = agentsForCall.shift();
+      answerCallWithAgent(answeringCall, chosenAgent, agentsForCall);
+    };
+
+    /**
+     * Handles the "Direct Ringing Answer" button click: answers a ringing call with an agent that is not ringing.
+     */
+    document.getElementById('directRingingAnswerBtn').onclick = () => {
+      const ringingCalls = callQueue.filter(c => c.state === 'ringing');
+      if (ringingCalls.length === 0) return;
+
+      const freeAgents = agentNodes.filter(a => !a.isBusy);
+      if (freeAgents.length === 0) return;
+
+      const answeringCall = ringingCalls[ringingCalls.length - 1];
+      const agentsForCall = links.filter(l => l.source === answeringCall).map(l => l.target);
+      const chosenAgent = freeAgents[getRandomInt(0, freeAgents.length - 1)];
+      answerCallWithAgent(answeringCall, chosenAgent, agentsForCall);
+    };
+
+    /**
+     * Handles the "Direct Queued Answer" button click: answers a queued call with an agent that is not ringing.
+     */
+    document.getElementById('directQueuedAnswerBtn').onclick = () => {
+      const queuedCalls = callQueue.filter(c => c.state === 'queued');
+      if (queuedCalls.length === 0) return;
+
+      const freeAgents = agentNodes.filter(a => !a.isBusy);
+      if (freeAgents.length === 0) return;
+
+      const answeringCall = queuedCalls[queuedCalls.length - 1];
+      const chosenAgent = freeAgents[getRandomInt(0, freeAgents.length - 1)];
+      answerCallWithAgent(answeringCall, chosenAgent);
     };
 
     /**
