@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <title>PBX Timeline Stable Channels</title>
 <style>
-body{font-family:Arial;margin:0;padding:10px}
+body{font-family:Arial;margin:0;padding:10px;box-sizing:border-box;width:100vw;overflow-x:hidden}
 #toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px}
 #viewport{height:700px;overflow-y:auto;overflow-x:hidden;border:1px solid #999;background:#fafafa;position:relative}
 #header-canvas{display:block;position:sticky;top:0;z-index:1;background:#fafafa}
@@ -19,6 +19,7 @@ button:disabled{opacity:.5}
 <button id="addEvent">Add Event</button>
 <button id="addChannel">Add Channel</button>
 <button id="demo">Demo</button>
+<button id="stopDemo" disabled>Stop Demo</button>
 <span>MAX_EVENTS=100</span>
 </div>
 <div id="viewport"><canvas id="header-canvas"></canvas><canvas id="c"></canvas></div>
@@ -51,21 +52,23 @@ let channelFirstEvtId=new Map();
 let numCols=4;
 let colSlots=new Array(numCols).fill(null); // colSlots[i] = channelId or null
 
-function chw(){ return Math.max(60, Math.floor((viewport.clientWidth - LEFT - RIGHT) / numCols)); }
+function chw(){ return Math.floor((canvasW - LEFT - RIGHT) / numCols); }
 function channelX(id){ return LEFT + channelIndex.get(id)*chw() + Math.floor(chw()/2); }
 
 function assignColumn(id){
- // find empty slot
  let slot=colSlots.indexOf(null);
  if(slot===-1){
-   // double columns: interleave existing into even indices
+   // double columns: move existing into even indices
    const newCols=numCols*2;
    const newSlots=new Array(newCols).fill(null);
-   for(let i=0;i<numCols;i++) newSlots[i*2]=colSlots[i];
+   for(let i=0;i<numCols;i++){
+     if(colSlots[i]!==null){
+       newSlots[i*2]=colSlots[i];
+       channelIndex.set(colSlots[i], i*2);
+     }
+   }
    numCols=newCols;
    colSlots=newSlots;
-   // update channelIndex for all existing channels
-   channelOrder.forEach(ch=>{ const old=channelIndex.get(ch); if(old!==undefined) channelIndex.set(ch,old*2); });
    slot=colSlots.indexOf(null);
  }
  colSlots[slot]=id;
@@ -74,7 +77,7 @@ function assignColumn(id){
 
 function releaseColumn(id){
  const slot=channelIndex.get(id);
- if(slot!==undefined) colSlots[slot]=null;
+ if(slot!==undefined){ colSlots[slot]=null; channelIndex.delete(id); }
 }
 
 function now(){
@@ -160,20 +163,20 @@ function addEventInternal(channelId,type){
  const atBottom=viewport.scrollTop+viewport.clientHeight>=viewport.scrollHeight-10;
 
  updateSelector();
- render();
+ scheduleRender();
 
  if(atBottom) requestAnimationFrame(()=>viewport.scrollTop=viewport.scrollHeight);
 }
 
 let canvasW=0,canvasH=0;
 function resizeCanvasIfNeeded(){
- const w=viewport.clientWidth||1200;
+ const w=(window.innerWidth - viewport.getBoundingClientRect().left - 12)|0||1200;
  const h=Math.max(700-HEADER, timeline.length*ROW+BOTTOM);
- if(w!==canvasW||h!==canvasH){
-   canvas.width=w; canvas.height=h;
-   canvasW=w; canvasH=h;
- }
- if(hdrCanvas.width!==w){ hdrCanvas.width=w; }
+ canvas.width=w; canvas.height=h;
+ canvas.style.width=w+'px';
+ hdrCanvas.width=w;
+ hdrCanvas.style.width=w+'px';
+ canvasW=w; canvasH=h;
 }
 
 function drawHeader(){
@@ -199,7 +202,6 @@ function drawHeader(){
 }
 
 function draw(){
- resizeCanvasIfNeeded();
  ctx.clearRect(0,0,canvasW,canvasH);
 
  const visible=visibleChannelIds();
@@ -273,7 +275,7 @@ function draw(){
    let alpha=1,dy=0;
    const a=animMap.get(e.id);
    if(a){
-     const p=Math.min((t-a.start)/250,1);
+     const p=Math.min((t-a.start)/150,1);
      alpha=p; dy=(1-p)*20;
      if(p>=1) doneAnims.push(e.id);
    }
@@ -291,7 +293,8 @@ function draw(){
    ctx.fill();
 
    ctx.fillStyle="#000";
-   ctx.fillText(e.type,x+18,y+4+dy);
+   const label=e.type.length>8?e.type.slice(0,7)+'…':e.type;
+   ctx.fillText(label,x+r+4,y+4+dy);
 
    ctx.restore();
  });
@@ -299,14 +302,20 @@ function draw(){
  doneAnims.forEach(id=>animMap.delete(id));
 }
 
+let renderPending=false;
 function render(){
+ renderPending=false;
+ resizeCanvasIfNeeded();
  drawHeader();
  draw();
- if(animMap.size) requestAnimationFrame(render);
+ if(animMap.size) scheduleRender();
+}
+function scheduleRender(){
+ if(!renderPending){ renderPending=true; requestAnimationFrame(render); }
 }
 
 document.getElementById('channel').addEventListener('change',updateButtons);
-window.addEventListener('resize',render);
+window.addEventListener('resize', ()=>requestAnimationFrame(scheduleRender));
 document.getElementById('addChannel').onclick=addChannel;
 document.getElementById('addEvent').onclick=()=>{
  const ch=document.getElementById('channel').value;
@@ -318,13 +327,20 @@ document.getElementById('addEvent').onclick=()=>{
 let timer=null;
 document.getElementById('demo').onclick=()=>{
  if(timer) return;
+ document.getElementById('demo').disabled=true;
+ document.getElementById('stopDemo').disabled=false;
  const types=["incoming","180 Ringing","200 OK","answer","bridge","dtmf","hold","transfer","hangup"];
  timer=setInterval(()=>{
    const active=visibleChannelIds().filter(id=>!channelClosed(id));
    if(active.length===0||Math.random()<0.15){ addChannel(); return; }
    const ch=active[Math.floor(Math.random()*active.length)];
    addEventInternal(ch,types[Math.floor(Math.random()*types.length)]);
- },1000);
+ },250);
+};
+document.getElementById('stopDemo').onclick=()=>{
+ clearInterval(timer); timer=null;
+ document.getElementById('demo').disabled=false;
+ document.getElementById('stopDemo').disabled=true;
 };
 
 addChannel();
@@ -332,7 +348,7 @@ addChannel();
 addEventInternal("CH-1","incoming");
 addEventInternal("CH-1","answer");
 addEventInternal("CH-2","incoming");
-render();
+scheduleRender();
 </script>
 </body>
 </html>
