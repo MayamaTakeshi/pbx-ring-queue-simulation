@@ -1,0 +1,299 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>PBX Timeline Stable Channels</title>
+<style>
+body{font-family:Arial;margin:0;padding:10px}
+#toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px}
+#viewport{height:700px;overflow:auto;border:1px solid #999;background:#fafafa;position:relative}
+#header-canvas{display:block;position:sticky;top:0;z-index:1;background:#fafafa}
+canvas{display:block}
+button:disabled{opacity:.5}
+</style>
+</head>
+<body>
+<div id="toolbar">
+<select id="channel"></select>
+<input id="event" value="incoming">
+<button id="addEvent">Add Event</button>
+<button id="addChannel">Add Channel</button>
+<button id="demo">Demo</button>
+<span>MAX_EVENTS=100</span>
+</div>
+<div id="viewport"><canvas id="header-canvas"></canvas><canvas id="c"></canvas></div>
+
+<script>
+const MAX_EVENTS=100;
+const HEADER=60,ROW=44,LEFT=180,CHW=110,RIGHT=250,BOTTOM=80;
+
+const canvas=document.getElementById('c');
+const ctx=canvas.getContext('2d');
+const hdrCanvas=document.getElementById('header-canvas');
+const hdrCtx=hdrCanvas.getContext('2d');
+const viewport=document.getElementById('viewport');
+
+let nextCh=1,nextEvt=1;
+let timeline=[];
+let channelOrder=[];
+// Map<eventId, {start, alpha, dy}> — O(1) anim lookup
+let animMap=new Map();
+// Map<channelId, index> — O(1) x-position lookup
+let channelIndex=new Map();
+// Map<channelId, lastType> — O(1) closed check
+let channelLastType=new Map();
+// Map<channelId, rowIndices[]> — O(1) rows-per-channel lookup
+let channelRows=new Map();
+// Map<channelId, firstEvtId> — never changes after first event, used to detect trimmed history
+let channelFirstEvtId=new Map();
+
+function now(){
+ const d=new Date();
+ return d.toLocaleTimeString()+"."+String(d.getMilliseconds()).padStart(3,'0');
+}
+
+function visibleChannelIds(){
+ // channelRows only contains channels present in timeline
+ return channelOrder.filter(id=>channelRows.has(id));
+}
+
+function channelX(id){ return LEFT + channelIndex.get(id)*CHW; }
+function rowY(r){ return r*ROW+ROW/2; }
+function channelClosed(id){ return channelLastType.get(id)==="hangup"; }
+
+function rebuildChannelIndex(){
+ channelIndex.clear();
+ channelOrder.forEach((id,i)=>channelIndex.set(id,i));
+}
+
+function rebuildDerivedState(){
+ channelLastType.clear();
+ channelRows.clear();
+ timeline.forEach((e,i)=>{
+   channelLastType.set(e.channelId, e.type);
+   if(!channelRows.has(e.channelId)) channelRows.set(e.channelId,[]);
+   channelRows.get(e.channelId).push(i);
+ });
+ // remove channels no longer in timeline
+ channelOrder=channelOrder.filter(id=>channelRows.has(id));
+ rebuildChannelIndex();
+}
+
+function updateSelector(){
+ const sel=document.getElementById('channel');
+ const current=sel.value;
+ sel.innerHTML='';
+ visibleChannelIds().forEach(id=>{
+   const o=document.createElement('option');
+   o.value=id;
+   o.textContent=id+(channelClosed(id)?" (closed)":"");
+   sel.appendChild(o);
+ });
+ if([...sel.options].some(o=>o.value===current)) sel.value=current;
+ updateButtons();
+}
+
+function updateButtons(){
+ const sel=document.getElementById('channel');
+ document.getElementById('addEvent').disabled=!sel.value||channelClosed(sel.value);
+}
+
+function trimTimeline(){
+ if(timeline.length<=MAX_EVENTS) return;
+ // remove excess from front, also clean up animMap entries
+ const removed=timeline.splice(0, timeline.length-MAX_EVENTS);
+ removed.forEach(e=>animMap.delete(e.id));
+ rebuildDerivedState();
+}
+
+function addChannel(){
+ const id="CH-"+(nextCh++);
+ channelOrder.push(id);
+ rebuildChannelIndex();
+ addEventInternal(id,"start");
+}
+
+function addEventInternal(channelId,type){
+ const evtId=nextEvt++;
+ timeline.push({id:evtId,channelId,type,timestamp:now()});
+
+ // update derived state incrementally (faster than full rebuild)
+ channelLastType.set(channelId, type);
+ if(!channelRows.has(channelId)){
+   channelRows.set(channelId,[]);
+   channelFirstEvtId.set(channelId, evtId);
+ }
+ channelRows.get(channelId).push(timeline.length-1);
+
+ trimTimeline(); // only rebuilds if trimming occurred
+
+ animMap.set(evtId,{start:performance.now()});
+
+ const atBottom=viewport.scrollTop+viewport.clientHeight>=viewport.scrollHeight-10;
+
+ updateSelector();
+ render();
+
+ if(atBottom) requestAnimationFrame(()=>viewport.scrollTop=viewport.scrollHeight);
+}
+
+let canvasW=0,canvasH=0;
+function resizeCanvasIfNeeded(){
+ const w=Math.max(1200, LEFT+Math.max(1,channelOrder.length)*CHW+RIGHT);
+ const h=Math.max(700-HEADER, timeline.length*ROW+BOTTOM);
+ if(w!==canvasW||h!==canvasH){
+   canvas.width=w; canvas.height=h;
+   canvasW=w; canvasH=h;
+ }
+ if(hdrCanvas.width!==w){ hdrCanvas.width=w; }
+}
+
+function drawHeader(){
+ hdrCanvas.height=HEADER;
+ hdrCtx.clearRect(0,0,hdrCanvas.width,HEADER);
+ hdrCtx.strokeStyle="#ccc";
+ hdrCtx.beginPath();
+ hdrCtx.moveTo(0,HEADER-1); hdrCtx.lineTo(hdrCanvas.width,HEADER-1);
+ hdrCtx.stroke();
+ hdrCtx.font="12px Arial";
+ hdrCtx.fillStyle="#000";
+ hdrCtx.textAlign="left";
+ hdrCtx.fillText("Seq",10,HEADER/2+4);
+ hdrCtx.fillText("Time",60,HEADER/2+4);
+ hdrCtx.font="bold 14px Arial";
+ hdrCtx.textAlign="center";
+ visibleChannelIds().forEach(id=>hdrCtx.fillText(id,channelX(id),HEADER/2+4));
+}
+
+function draw(){
+ resizeCanvasIfNeeded();
+ ctx.clearRect(0,0,canvasW,canvasH);
+
+ const visible=visibleChannelIds();
+
+ ctx.textAlign="left";
+ ctx.font="12px Arial";
+
+ // batch horizontal grid lines into a single path
+ ctx.strokeStyle="#eee";
+ ctx.beginPath();
+ for(let r=0;r<timeline.length;r++){
+   const y=rowY(r);
+   ctx.moveTo(0,y);
+   ctx.lineTo(canvasW,y);
+ }
+ ctx.stroke();
+
+ ctx.fillStyle="#777";
+ for(let r=0;r<timeline.length;r++){
+   const y=rowY(r)+4;
+   ctx.fillText(String(r+1),10,y);
+   ctx.fillText(timeline[r].timestamp,60,y);
+ }
+
+ // batch vertical connector lines per channel into one path
+ ctx.strokeStyle="#666";
+ ctx.lineWidth=3;
+ ctx.beginPath();
+ visible.forEach(ch=>{
+   const rows=channelRows.get(ch);
+   if(!rows||rows.length<2) return;
+   const x=channelX(ch);
+   for(let i=0;i<rows.length-1;i++){
+     ctx.moveTo(x,rowY(rows[i]));
+     ctx.lineTo(x,rowY(rows[i+1]));
+   }
+ });
+ ctx.stroke();
+
+ // dashed "continuation from above" line for channels whose first visible event is not their first ever event
+ ctx.strokeStyle="#aaa";
+ ctx.lineWidth=2;
+ ctx.setLineDash([6,4]);
+ ctx.beginPath();
+ visible.forEach(ch=>{
+   const rows=channelRows.get(ch);
+   if(!rows||rows.length===0) return;
+   const firstVisibleEvent=timeline[rows[0]];
+   // if this event's id is not 1 more than a start, there were earlier events trimmed
+   // we detect trimming by checking if any earlier timeline entry exists for this channel — none will,
+   // so instead we track each channel's original first event id
+   if(channelFirstEvtId.get(ch)!==firstVisibleEvent.id){
+     const x=channelX(ch);
+     ctx.moveTo(x,0);
+     ctx.lineTo(x,rowY(rows[0]));
+   }
+ });
+ ctx.stroke();
+ ctx.setLineDash([]);
+ ctx.lineWidth=1;
+
+ const t=performance.now();
+ const doneAnims=[];
+
+ timeline.forEach((e,row)=>{
+   let alpha=1,dy=0;
+   const a=animMap.get(e.id);
+   if(a){
+     const p=Math.min((t-a.start)/250,1);
+     alpha=p; dy=(1-p)*20;
+     if(p>=1) doneAnims.push(e.id);
+   }
+
+   const x=channelX(e.channelId);
+   const y=rowY(row);
+   const r=(e.type==="start"||e.type==="hangup")?10:8;
+
+   ctx.save();
+   ctx.globalAlpha=alpha;
+
+   ctx.beginPath();
+   ctx.arc(x,y+dy,r,0,Math.PI*2);
+   ctx.fillStyle=e.type==="start"?"green":e.type==="hangup"?"crimson":"steelblue";
+   ctx.fill();
+
+   ctx.fillStyle="#000";
+   ctx.fillText(e.type,x+18,y+4+dy);
+
+   ctx.restore();
+ });
+
+ doneAnims.forEach(id=>animMap.delete(id));
+}
+
+function render(){
+ drawHeader();
+ draw();
+ if(animMap.size) requestAnimationFrame(render);
+}
+
+document.getElementById('channel').addEventListener('change',updateButtons);
+document.getElementById('addChannel').onclick=addChannel;
+document.getElementById('addEvent').onclick=()=>{
+ const ch=document.getElementById('channel').value;
+ const ev=document.getElementById('event').value.trim();
+ if(!ch||channelClosed(ch)) return;
+ addEventInternal(ch,ev);
+};
+
+let timer=null;
+document.getElementById('demo').onclick=()=>{
+ if(timer) return;
+ const types=["incoming","180 Ringing","200 OK","answer","bridge","dtmf","hold","transfer","hangup"];
+ timer=setInterval(()=>{
+   const active=visibleChannelIds().filter(id=>!channelClosed(id));
+   if(active.length===0||Math.random()<0.15){ addChannel(); return; }
+   const ch=active[Math.floor(Math.random()*active.length)];
+   addEventInternal(ch,types[Math.floor(Math.random()*types.length)]);
+ },1000);
+};
+
+addChannel();
+addChannel();
+addEventInternal("CH-1","incoming");
+addEventInternal("CH-1","answer");
+addEventInternal("CH-2","incoming");
+render();
+</script>
+</body>
+</html>
