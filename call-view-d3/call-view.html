@@ -20,12 +20,13 @@ button:disabled{opacity:.5}
 <button id="addChannel">Add Channel</button>
 <button id="demo">Demo</button>
 <button id="stopDemo" disabled>Stop Demo</button>
-<span>MAX_EVENTS=100</span>
+<span>MAX_EVENTS=100 MAX_CHANNELS=256</span>
 </div>
 <div id="viewport"><canvas id="header-canvas"></canvas><canvas id="c"></canvas></div>
 
 <script>
 const MAX_EVENTS=100;
+const MAX_CHANNELS=256;
 const HEADER=60,ROW=44,LEFT=180,RIGHT=20,BOTTOM=80;
 
 const canvas=document.getElementById('c');
@@ -48,9 +49,9 @@ let channelRows=new Map();
 // Map<channelId, firstEvtId> — never changes after first event, used to detect trimmed history
 let channelFirstEvtId=new Map();
 
-// Fixed grid of columns: numCols total slots, some occupied by a channelId, some null
-let numCols=4;
-let colSlots=new Array(numCols).fill(null); // colSlots[i] = channelId or null
+// Column grid: starts at 6 cols, doubles when full. colSlots[i] = channelId or null.
+let numCols=6;
+let colSlots=new Array(numCols).fill(null);
 
 function chw(){ return Math.floor((canvasW - LEFT - RIGHT) / numCols); }
 function channelX(id){ return LEFT + channelIndex.get(id)*chw() + Math.floor(chw()/2); }
@@ -58,26 +59,37 @@ function channelX(id){ return LEFT + channelIndex.get(id)*chw() + Math.floor(chw
 function assignColumn(id){
  let slot=colSlots.indexOf(null);
  if(slot===-1){
-   // double columns: move existing into even indices
-   const newCols=numCols*2;
-   const newSlots=new Array(newCols).fill(null);
-   for(let i=0;i<numCols;i++){
-     if(colSlots[i]!==null){
-       newSlots[i*2]=colSlots[i];
-       channelIndex.set(colSlots[i], i*2);
-     }
-   }
-   numCols=newCols;
-   colSlots=newSlots;
-   slot=colSlots.indexOf(null);
+   const n=numCols*2;
+   const newSlots=new Array(n).fill(null);
+   for(let i=0;i<numCols;i++) if(colSlots[i]!==null) newSlots[i*2]=colSlots[i];
+   channelIndex.forEach((s,ch)=>channelIndex.set(ch,s*2));
+   numCols=n; colSlots=newSlots;
  }
- colSlots[slot]=id;
- channelIndex.set(id,slot);
+ // Pick the free slot maximally distant from occupied neighbors (with virtual walls at edges)
+ let bestS=0, bestDist=-1;
+ for(let i=0;i<numCols;i++){
+   if(colSlots[i]!==null) continue;
+   let left=i+1;
+   for(let j=i-1;j>=0;j--){ if(colSlots[j]!==null){left=i-j;break;} }
+   let right=numCols-i;
+   for(let j=i+1;j<numCols;j++){ if(colSlots[j]!==null){right=j-i;break;} }
+   const dist=Math.min(left,right);
+   if(dist>bestDist){ bestDist=dist; bestS=i; }
+ }
+ colSlots[bestS]=id;
+ channelIndex.set(id,bestS);
 }
 
 function releaseColumn(id){
  const slot=channelIndex.get(id);
- if(slot!==undefined){ colSlots[slot]=null; channelIndex.delete(id); }
+ if(slot!==undefined) colSlots[slot]=null;
+ // keep channelIndex entry so events remain drawable until trimmed
+}
+
+function rebuildChannelIndex(){
+ // Only update slots for currently active (non-released) channels
+ colSlots.forEach((id,i)=>{ if(id!==null) channelIndex.set(id,i); });
+ // Released channels keep their channelIndex entries intact
 }
 
 function now(){
@@ -92,11 +104,6 @@ function visibleChannelIds(){
 
 function rowY(r){ return r*ROW+ROW/2; }
 function channelClosed(id){ return channelLastType.get(id)==="hangup"; }
-
-function rebuildChannelIndex(){
- channelIndex.clear();
- colSlots.forEach((id,i)=>{ if(id!==null) channelIndex.set(id,i); });
-}
 
 function rebuildDerivedState(){
  channelLastType.clear();
@@ -137,6 +144,9 @@ function trimTimeline(){
 }
 
 function addChannel(){
+ // If at limit, force hangup the oldest active channel first
+ const active=colSlots.filter(id=>id!==null&&!channelClosed(id));
+ if(active.length>=MAX_CHANNELS) addEventInternal(active[0],"hangup");
  const id="CH-"+(nextCh++);
  channelOrder.push(id);
  assignColumn(id);
@@ -247,26 +257,17 @@ function draw(){
  ctx.stroke();
 
  // dashed "continuation from above" line for channels whose first visible event is not their first ever event
- ctx.strokeStyle="#aaa";
- ctx.lineWidth=2;
- ctx.setLineDash([6,4]);
- ctx.beginPath();
- visible.forEach(ch=>{
-   const rows=channelRows.get(ch);
-   if(!rows||rows.length===0) return;
-   const firstVisibleEvent=timeline[rows[0]];
-   // if this event's id is not 1 more than a start, there were earlier events trimmed
-   // we detect trimming by checking if any earlier timeline entry exists for this channel — none will,
-   // so instead we track each channel's original first event id
-   if(channelFirstEvtId.get(ch)!==firstVisibleEvent.id){
-     const x=channelX(ch);
-     ctx.moveTo(x,0);
-     ctx.lineTo(x,rowY(rows[0]));
-   }
- });
- ctx.stroke();
- ctx.setLineDash([]);
+ // solid line for all active channels: full height, connectors override with thicker line
+ ctx.strokeStyle="#ccc";
  ctx.lineWidth=1;
+ ctx.beginPath();
+ for(let i=0;i<numCols;i++){
+   const ch=colSlots[i];
+   if(ch===null) continue;
+   const x=LEFT+i*chw()+Math.floor(chw()/2);
+   ctx.moveTo(x,0); ctx.lineTo(x,canvasH);
+ }
+ ctx.stroke();
 
  const t=performance.now();
  const doneAnims=[];
@@ -331,7 +332,7 @@ document.getElementById('demo').onclick=()=>{
  document.getElementById('stopDemo').disabled=false;
  const types=["incoming","180 Ringing","200 OK","answer","bridge","dtmf","hold","transfer","hangup"];
  timer=setInterval(()=>{
-   const active=visibleChannelIds().filter(id=>!channelClosed(id));
+   const active=colSlots.filter(id=>id!==null&&!channelClosed(id));
    if(active.length===0||Math.random()<0.15){ addChannel(); return; }
    const ch=active[Math.floor(Math.random()*active.length)];
    addEventInternal(ch,types[Math.floor(Math.random()*types.length)]);
