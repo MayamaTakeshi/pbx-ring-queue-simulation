@@ -6,7 +6,7 @@
 <style>
 body{font-family:Arial;margin:0;padding:10px}
 #toolbar{display:flex;gap:8px;align-items:center;margin-bottom:8px}
-#viewport{height:700px;overflow:auto;border:1px solid #999;background:#fafafa;position:relative}
+#viewport{height:700px;overflow-y:auto;overflow-x:hidden;border:1px solid #999;background:#fafafa;position:relative}
 #header-canvas{display:block;position:sticky;top:0;z-index:1;background:#fafafa}
 canvas{display:block}
 button:disabled{opacity:.5}
@@ -25,7 +25,7 @@ button:disabled{opacity:.5}
 
 <script>
 const MAX_EVENTS=100;
-const HEADER=60,ROW=44,LEFT=180,CHW=110,RIGHT=250,BOTTOM=80;
+const HEADER=60,ROW=44,LEFT=180,RIGHT=20,BOTTOM=80;
 
 const canvas=document.getElementById('c');
 const ctx=canvas.getContext('2d');
@@ -47,6 +47,36 @@ let channelRows=new Map();
 // Map<channelId, firstEvtId> — never changes after first event, used to detect trimmed history
 let channelFirstEvtId=new Map();
 
+// Fixed grid of columns: numCols total slots, some occupied by a channelId, some null
+let numCols=4;
+let colSlots=new Array(numCols).fill(null); // colSlots[i] = channelId or null
+
+function chw(){ return Math.max(60, Math.floor((viewport.clientWidth - LEFT - RIGHT) / numCols)); }
+function channelX(id){ return LEFT + channelIndex.get(id)*chw() + Math.floor(chw()/2); }
+
+function assignColumn(id){
+ // find empty slot
+ let slot=colSlots.indexOf(null);
+ if(slot===-1){
+   // double columns: interleave existing into even indices
+   const newCols=numCols*2;
+   const newSlots=new Array(newCols).fill(null);
+   for(let i=0;i<numCols;i++) newSlots[i*2]=colSlots[i];
+   numCols=newCols;
+   colSlots=newSlots;
+   // update channelIndex for all existing channels
+   channelOrder.forEach(ch=>{ const old=channelIndex.get(ch); if(old!==undefined) channelIndex.set(ch,old*2); });
+   slot=colSlots.indexOf(null);
+ }
+ colSlots[slot]=id;
+ channelIndex.set(id,slot);
+}
+
+function releaseColumn(id){
+ const slot=channelIndex.get(id);
+ if(slot!==undefined) colSlots[slot]=null;
+}
+
 function now(){
  const d=new Date();
  return d.toLocaleTimeString()+"."+String(d.getMilliseconds()).padStart(3,'0');
@@ -57,13 +87,12 @@ function visibleChannelIds(){
  return channelOrder.filter(id=>channelRows.has(id));
 }
 
-function channelX(id){ return LEFT + channelIndex.get(id)*CHW; }
 function rowY(r){ return r*ROW+ROW/2; }
 function channelClosed(id){ return channelLastType.get(id)==="hangup"; }
 
 function rebuildChannelIndex(){
  channelIndex.clear();
- channelOrder.forEach((id,i)=>channelIndex.set(id,i));
+ colSlots.forEach((id,i)=>{ if(id!==null) channelIndex.set(id,i); });
 }
 
 function rebuildDerivedState(){
@@ -74,8 +103,6 @@ function rebuildDerivedState(){
    if(!channelRows.has(e.channelId)) channelRows.set(e.channelId,[]);
    channelRows.get(e.channelId).push(i);
  });
- // remove channels no longer in timeline
- channelOrder=channelOrder.filter(id=>channelRows.has(id));
  rebuildChannelIndex();
 }
 
@@ -109,7 +136,7 @@ function trimTimeline(){
 function addChannel(){
  const id="CH-"+(nextCh++);
  channelOrder.push(id);
- rebuildChannelIndex();
+ assignColumn(id);
  addEventInternal(id,"start");
 }
 
@@ -124,6 +151,7 @@ function addEventInternal(channelId,type){
    channelFirstEvtId.set(channelId, evtId);
  }
  channelRows.get(channelId).push(timeline.length-1);
+ if(type==="hangup") releaseColumn(channelId);
 
  trimTimeline(); // only rebuilds if trimming occurred
 
@@ -139,7 +167,7 @@ function addEventInternal(channelId,type){
 
 let canvasW=0,canvasH=0;
 function resizeCanvasIfNeeded(){
- const w=Math.max(1200, LEFT+Math.max(1,channelOrder.length)*CHW+RIGHT);
+ const w=viewport.clientWidth||1200;
  const h=Math.max(700-HEADER, timeline.length*ROW+BOTTOM);
  if(w!==canvasW||h!==canvasH){
    canvas.width=w; canvas.height=h;
@@ -160,9 +188,14 @@ function drawHeader(){
  hdrCtx.textAlign="left";
  hdrCtx.fillText("Seq",10,HEADER/2+4);
  hdrCtx.fillText("Time",60,HEADER/2+4);
- hdrCtx.font="bold 14px Arial";
- hdrCtx.textAlign="center";
- visibleChannelIds().forEach(id=>hdrCtx.fillText(id,channelX(id),HEADER/2+4));
+ // draw vertical grid lines for all columns
+ hdrCtx.strokeStyle="#eee";
+ hdrCtx.beginPath();
+ for(let i=0;i<numCols;i++){
+   const x=LEFT+i*chw();
+   hdrCtx.moveTo(x,0); hdrCtx.lineTo(x,HEADER);
+ }
+ hdrCtx.stroke();
 }
 
 function draw(){
@@ -181,6 +214,11 @@ function draw(){
    const y=rowY(r);
    ctx.moveTo(0,y);
    ctx.lineTo(canvasW,y);
+ }
+ // vertical column lines
+ for(let i=0;i<numCols;i++){
+   const x=LEFT+i*chw();
+   ctx.moveTo(x,0); ctx.lineTo(x,canvasH);
  }
  ctx.stroke();
 
@@ -268,6 +306,7 @@ function render(){
 }
 
 document.getElementById('channel').addEventListener('change',updateButtons);
+window.addEventListener('resize',render);
 document.getElementById('addChannel').onclick=addChannel;
 document.getElementById('addEvent').onclick=()=>{
  const ch=document.getElementById('channel').value;
